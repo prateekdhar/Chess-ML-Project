@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Simple Chessboard</title>
+  <style>
+    body {
+      background: url('wallpaper/wallpaper.png') no-repeat center center fixed;
+      background-size: cover;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    .chessboard {
+      display: grid;
+      grid-template: repeat(8, 64px) / repeat(8, 64px);
+      border: 4px solid #333;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2); /* Increased shadow for a faint effect */
+      margin-top: 50px; /* Raised the chessboard */
+    }
+    .chessboard div { width: 64px; height: 64px; position: relative; }
+    .piece { position: absolute; width: 56px; height: 56px; top: 4px; left: 4px; pointer-events: none; user-select: none; }
+    .white { background: #f0d9b5; }
+    .black { background: #b58863; }
+    .highlight::after {
+      content: '';
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      background: rgba(139, 69, 19, 0.8); /* Tiny brown circle */
+      border-radius: 50%;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+    .check {
+      background: rgba(255, 0, 0, 0.5); /* Red tint for king's square */
+    }
+  </style>
+</head>
+<body>
+  <div class="chessboard"></div>
+  <script>
+      const board = document.querySelector('.chessboard');
+      const spriteOverrides = {
+        bB: 'sprites/Black Bishop.png',
+        bK: 'sprites/Black King.png',
+        wB: 'sprites/White Bishop.png',
+        bQ: 'sprites/Black Queen.png',
+        bR: 'sprites/Black Rook.png',
+        bN: 'sprites/Black Knight.png',
+        bP: 'sprites/Black Pawn.png',
+        wK: 'sprites/White King.png',
+        wQ: 'sprites/White Queen.png',
+        wR: 'sprites/White Rook.png',
+        wN: 'sprites/White Knight.png',
+        wP: 'sprites/White Pawn.png'
+      };
+      const startPos = [
+        ['bR','bN','bB','bQ','bK','bB','bN','bR'],
+        ['bP','bP','bP','bP','bP','bP','bP','bP'],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        ['wP','wP','wP','wP','wP','wP','wP','wP'],
+        ['wR','wN','wB','wQ','wK','wB','wN','wR']
+      ];
+      for(let row=0; row<8; row++) {
+        for(let col=0; col<8; col++) {
+          const square = document.createElement('div');
+          square.className = ((row+col)%2 === 0) ? 'white' : 'black';
+          const piece = startPos[row][col];
+          if(piece) {
+            const img = document.createElement('img');
+            img.src = spriteOverrides[piece];
+            img.className = 'piece';
+            img.alt = piece;
+            square.appendChild(img);
+          }
+          board.appendChild(square);
+        }
+      }
+    </script>
+</body>
+</html>
