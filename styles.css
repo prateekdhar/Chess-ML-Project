@@ -1,0 +1,264 @@
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400&display=swap');
+
+/* Theme Variables */
+:root {
+    --bg-gradient-start: #dbe9e5;
+    --bg-gradient-mid: #c7ddd7;
+    --bg-gradient-end: #b3d1ca;
+    --square-light: #f5f5dc; /* ecru */
+    --square-dark: #5b3a29; /* oak */
+    --panel-bg: #ffffff;
+    --panel-border: #5b3a29;
+    --text-color: #5b3a29;
+    --accent-red: #c82828;
+    --history-odd: rgba(91,58,41,0.06);
+    --history-even: rgba(245,245,220,0.55);
+    --indicator-light: rgba(91,58,41,0.75);
+    --indicator-dark: rgba(245,245,220,0.75);
+}
+
+body.dark {
+    --bg-gradient-start: #1f2625;
+    --bg-gradient-mid: #1a2221;
+    --bg-gradient-end: #151c1b;
+    --square-light: #b9b292; /* muted ecru */
+    --square-dark: #37251b; /* deeper oak */
+    --panel-bg: #262d2c;
+    --panel-border: #b9b292;
+    --text-color: #e8e4d6;
+    --accent-red: #e05252;
+    --history-odd: rgba(185,178,146,0.12);
+    --history-even: rgba(55,37,27,0.55);
+    --indicator-light: rgba(55,37,27,0.85);
+    --indicator-dark: rgba(233,230,214,0.85);
+}
+
+body {
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    min-height: 100vh;
+    margin: 0;
+    padding-top: 40px; /* added to prevent top elements (e.g., top clock) from being cut off */
+    /* Gradient based on theme variables */
+    background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-mid) 50%, var(--bg-gradient-end) 100%);
+    color: var(--text-color);
+}
+
+.app-layout { display: flex; gap: 24px; padding: 24px; }
+
+#move-panel {
+    width: 220px;
+    background: var(--panel-bg);
+    border: 2px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 12px 14px 16px;
+    font-family: 'Roboto', sans-serif;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+    display: flex;
+    flex-direction: column;
+    max-height: 660px;
+    position: relative;
+}
+
+#move-panel h3 { margin: 0 0 10px; font-size: 16px; color: var(--text-color); }
+
+table.history-table { width: 100%; border-collapse: collapse; font-size: 14px; font-family: 'Roboto', sans-serif; }
+table.history-table thead { position: sticky; top: 0; background: var(--square-dark); color: var(--square-light); }
+table.history-table th, table.history-table td { padding: 4px 6px; text-align: left; }
+/* History wrapper ensures scroll for rows while header stays fixed */
+.history-wrapper { flex: 1; overflow-y: auto; border: 1px solid #e1d9c9; border-radius: 4px; }
+table.history-table tbody { display: table; width: 100%; }
+table.history-table thead tr { display: table; width: 100%; table-layout: fixed; }
+table.history-table tbody tr { table-layout: fixed; }
+table.history-table thead tr { display: table; width: 100%; table-layout: fixed; }
+table.history-table tbody tr { display: table; width: 100%; table-layout: fixed; }
+table.history-table tbody tr.selected-move { outline: 2px solid var(--accent-red); position: relative; }
+table.history-table tbody tr.selected-move::after { content:''; position:absolute; inset:0; background: rgba(200,40,40,0.08); pointer-events:none; }
+/* Row striping now handled via Tailwind odd:/even: utilities injected at runtime */
+table.history-table td.move { cursor: default; }
+table.history-table td.check { color: #d42222; font-weight: 600; }
+table.history-table td.checkmate { background: #d42222; color: #fff; font-weight: 700; }
+
+.result-banner { margin-top: 8px; font-size: 14px; font-weight: 600; color: var(--text-color); min-height: 20px; }
+
+/* Side Clocks */
+.side-clock { position:absolute; left:50%; transform:translateX(-50%); background: var(--history-even); border:1px solid var(--panel-border); border-radius:8px; padding:6px 10px; min-width:130px; display:flex; justify-content:space-between; gap:12px; font-family:'Roboto',sans-serif; font-size:13px; font-weight:600; box-shadow:0 2px 6px rgba(0,0,0,.28); backdrop-filter: blur(2px); }
+body.dark .side-clock { background: var(--history-odd); }
+.side-clock.active { outline:2px solid var(--accent-red); }
+.side-clock .time { font-variant-numeric: tabular-nums; font-size:15px; }
+.clock-top { top:-44px; }
+.clock-bottom { bottom:-44px; }
+/* Adjust spacing if small viewport */
+@media (max-width: 900px) {
+    .clock-top { top:-38px; }
+    .clock-bottom { bottom:-38px; }
+}
+/* When board flipped, keep black at bottom visually (perspective reversal) */
+body.board-flipped .clock-top { bottom:-44px; top:auto; }
+body.board-flipped .clock-bottom { top:-44px; bottom:auto; }
+
+.chessboard {
+    display: grid;
+    grid-template-columns: repeat(8, 80px);
+    grid-template-rows: repeat(8, 80px);
+    border: 2px solid black;
+    transition: transform .5s ease;
+}
+
+.chessboard div {
+    width: 80px;
+    height: 80px;
+    position: relative;
+    overflow: hidden;
+    transition: transform .5s ease;
+}
+
+.chessboard .white { background-color: var(--square-light); }
+.chessboard .black { background-color: var(--square-dark); }
+
+.chessboard img {
+    width: 100%;
+    height: 100%;
+    /* make images positioned so we can control stacking order */
+    position: relative;
+    z-index: 10; /* images sit below indicators */
+    transition: transform .5s ease;
+}
+
+/* Flipped orientation when player chooses Black */
+body.board-flipped .chessboard { transform: rotate(180deg); }
+/* Only rotate labels back so text is upright; squares/pieces stay flipped */
+body.board-flipped .chessboard div span { transform: rotate(180deg); display:inline-block; }
+/* Counter-rotate piece images so they remain upright */
+body.board-flipped .chessboard img { transform: rotate(180deg); }
+
+.chessboard div span {
+    position: absolute;
+    font-size: 12px;
+    font-family: 'Roboto', sans-serif;
+    pointer-events: none;
+}
+
+.chessboard div .file-label {
+    bottom: 4px !important;
+    left: 4px !important;
+}
+
+.chessboard div .rank-label {
+    top: 4px;
+    left: 4px;
+}
+
+.chessboard .white span { color: var(--square-dark); }
+.chessboard .black span { color: var(--square-light); }
+
+/* Ensure indicators contrast with the square color */
+/* Normal move indicators: small filled dot centered */
+.chessboard .white .move-indicator { --ind-fill: var(--indicator-light); }
+.chessboard .black .move-indicator { --ind-fill: var(--indicator-dark); }
+
+
+/* Slightly larger and centered */
+.move-indicator {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+     /* size relative to the parent square so it scales with board size
+         target ratio: roughly 36% of the square (lichess-like) */
+    width: 10%;
+    height: 10%;
+     max-width: 40px;
+     max-height: 40px;
+     border-radius: 50%;
+     transform: translate(-50%, -50%);
+    pointer-events: auto;
+    z-index: 200; /* ensure it's above piece images */
+    /* Small filled dot for quiet moves */
+    background: var(--ind-fill, rgba(0,0,0,0.6));
+    border: none;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.35), 0 1px 3px rgba(0,0,0,0.25);
+    transition: transform 0.12s ease, opacity 0.12s ease;
+    opacity: 1;
+}
+
+.move-indicator:hover {
+     transform: translate(-50%, -50%) scale(1.25);
+     opacity: 0.95;
+}
+
+/* inner filled dot for visibility; pointer-events none so clicks go to the indicator itself */
+/* Remove inner dot for capture (ring only) */
+.move-indicator.capture::after { display: none !important; }
+
+/* Capture indicators: ensure rule placed AFTER base styles so it overrides */
+.move-indicator.capture {
+    --capture-ring: rgba(200,40,40,0.96);
+    background: transparent !important;
+    border: 5px solid var(--capture-ring) !important;
+    width: 64% !important;
+    height: 64% !important;
+    box-shadow: 0 0 0 2px rgba(255,255,255,0.9), 0 2px 8px rgba(0,0,0,0.4) !important;
+}
+
+/* Square-level capture ring (fallback + clearer) */
+/* Capture target: simple red outline covering entire square */
+.chessboard div.capture-target { box-shadow: inset 0 0 0 5px var(--accent-red), 0 0 4px rgba(0,0,0,0.35); }
+
+/* Navigation buttons */
+.nav-controls .nav-btn {
+    flex: 1 1 48px;
+    background: var(--panel-border);
+    color: var(--square-light);
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    padding: 4px 0;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background .25s;
+}
+.nav-controls .nav-btn:disabled { opacity: .45; cursor: not-allowed; }
+.nav-controls .nav-btn:hover:not(:disabled) { background: linear-gradient(135deg, var(--panel-border), var(--square-dark)); }
+body.dark .nav-controls .nav-btn { background: var(--square-dark); color: var(--text-color); border-color: var(--square-light); }
+body.dark .nav-controls .nav-btn:hover:not(:disabled) { background: linear-gradient(135deg, #523a2c,#261a13); }
+
+/* Theme Toggle Switch */
+.theme-toggle { position: relative; display: inline-block; }
+.theme-toggle input { position: absolute; opacity: 0; width:0; height:0; }
+.theme-toggle-label {
+    --toggle-width: 54px;
+    --toggle-height: 26px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    position: relative;
+    width: var(--toggle-width);
+    height: var(--toggle-height);
+    padding: 0 6px;
+    background: var(--panel-border);
+    border-radius: 999px;
+    box-shadow: inset 0 0 3px rgba(0,0,0,0.4);
+    transition: background .35s ease;
+    color: var(--square-light);
+    font-size: 0;
+}
+.theme-toggle-label .icon { display:flex; align-items:center; justify-content:center; width:16px; height:16px; color: var(--square-light); }
+.theme-toggle-label .icon.sun { opacity:1; transition: opacity .3s ease; }
+.theme-toggle-label .icon.moon { opacity:0; position:absolute; right:8px; transition: opacity .3s ease; }
+.theme-toggle-label .knob {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 20px;
+    height: 20px;
+    background: var(--panel-bg);
+    border-radius: 50%;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.4);
+    transition: transform .35s cubic-bezier(.55,.1,.25,1), background .35s;
+}
+.theme-toggle input:checked + .theme-toggle-label .knob { transform: translateX(28px); }
+.theme-toggle input:checked + .theme-toggle-label .icon.sun { opacity:0; }
+.theme-toggle input:checked + .theme-toggle-label .icon.moon { opacity:1; }
+
+body.dark .theme-toggle-label { background: linear-gradient(135deg, #4b362a, #241913); color: var(--text-color); }
+body.dark .theme-toggle-label .knob { background: var(--square-light); }

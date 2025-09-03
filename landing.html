@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chess – Choose Side</title>
+  <link rel="stylesheet" href="styles.css?v=20250903" />
+  <style>
+    .landing-container { max-width:420px; margin:60px auto; background: var(--panel-bg); border:2px solid var(--panel-border); border-radius:12px; padding:32px 36px 40px; font-family:'Roboto',sans-serif; box-shadow:0 6px 18px rgba(0,0,0,.18); }
+    .landing-container h1 { margin:0 0 12px; font-size:24px; font-weight:600; text-align:center; color: var(--text-color); }
+    .landing-container p { margin:0 0 28px; text-align:center; line-height:1.4; }
+    .choose-grid { display:flex; gap:18px; justify-content:center; }
+    .side-card { flex:1; min-width:140px; background: linear-gradient(135deg,var(--square-light),var(--history-even)); border:2px solid var(--panel-border); border-radius:10px; padding:14px 12px 16px; display:flex; flex-direction:column; align-items:center; gap:10px; position:relative; transition:.35s box-shadow,.35s transform; cursor:pointer; }
+    .side-card:hover { box-shadow:0 4px 10px rgba(0,0,0,.25); transform: translateY(-4px); }
+    .side-card.black { background: linear-gradient(135deg,var(--square-dark),#2d1d15); color: var(--square-light); }
+    .side-card .label { font-size:18px; font-weight:600; }
+    .go-btn { all:unset; cursor:pointer; font-size:14px; padding:8px 16px; background: var(--panel-border); color: var(--square-light); border-radius:6px; font-weight:600; letter-spacing:.5px; box-shadow:0 2px 6px rgba(0,0,0,.25); transition: background .3s, transform .25s; }
+    .side-card.black .go-btn { background: var(--square-light); color: var(--square-dark); }
+    .go-btn:hover { background: var(--accent-red); transform: translateY(-2px); }
+    .note { margin-top:22px; font-size:12px; text-align:center; opacity:.8; }
+    .footer-links { margin-top:28px; text-align:center; font-size:12px; }
+    .footer-links a { color: var(--accent-red); text-decoration:none; }
+  .footer-links a:hover { text-decoration:underline; }
+  .time-btn { all:unset; background: var(--square-light); color: var(--square-dark); padding:6px 12px; border:2px solid var(--panel-border); border-radius:6px; font-size:13px; font-weight:600; cursor:pointer; min-width:70px; text-align:center; box-shadow:0 1px 3px rgba(0,0,0,.25); transition:.25s background,.25s transform; }
+  .time-btn:hover { background: var(--history-even); transform: translateY(-2px); }
+  .time-btn.selected { background: var(--panel-border); color: var(--square-light); box-shadow:0 2px 6px rgba(0,0,0,.3); }
+  body.dark .time-btn { background: var(--square-dark); color: var(--square-light); border-color: var(--square-light); }
+  body.dark .time-btn.selected { background: var(--square-light); color: var(--square-dark); }
+  </style>
+</head>
+<body>
+  <div class="landing-container">
+    <h1>Play Chess</h1>
+    <p>Select your side and a time control. The board will orient accordingly.</p>
+    <div class="time-select" aria-label="Choose time control" style="margin:0 0 26px;">
+      <div style="font-size:14px;font-weight:600;margin:0 0 8px; text-align:center;">Time Control</div>
+      <div class="time-options" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;">
+        <button type="button" class="time-btn selected" data-mins="0" aria-pressed="true" title="Unlimited / No clock">Unlimited</button>
+        <button type="button" class="time-btn" data-mins="1" aria-pressed="false" title="1 minute blitz">1</button>
+        <button type="button" class="time-btn" data-mins="3" aria-pressed="false" title="3 minute blitz">3</button>
+        <button type="button" class="time-btn" data-mins="5" aria-pressed="false" title="5 minute blitz">5</button>
+      </div>
+    </div>
+    <div class="choose-grid">
+      <div class="side-card white" data-color="White" tabindex="0" role="button" aria-label="Play as White">
+        <div class="label">White</div>
+        <button class="go-btn" type="button">Start →</button>
+      </div>
+      <div class="side-card black" data-color="Black" tabindex="0" role="button" aria-label="Play as Black">
+        <div class="label">Black</div>
+        <button class="go-btn" type="button">Start →</button>
+      </div>
+    </div>
+    <div class="note">Note: White always moves first. Choosing Black only flips the board orientation.</div>
+    <div class="footer-links"><a href="index.html">Skip (default White)</a></div>
+  </div>
+  <script>
+    (function(){
+      const cards = document.querySelectorAll('.side-card');
+      function launch(color){
+        const sel = document.querySelector('.time-btn.selected');
+        const minutes = sel ? parseInt(sel.dataset.mins,10) : 0;
+        try {
+          localStorage.setItem('playerColor', color);
+          localStorage.setItem('timeControlMinutes', String(minutes));
+          console.log('[landing] stored playerColor =', color);
+          console.log('[landing] stored timeControlMinutes =', minutes);
+        } catch(err) { console.warn('localStorage failed', err); }
+        window.location.href = 'index.html?side=' + encodeURIComponent(color) + '&tc=' + minutes;
+      }
+      cards.forEach(card => {
+        const color = card.getAttribute('data-color') || 'White';
+        const btn = card.querySelector('.go-btn');
+        card.addEventListener('click', () => launch(color));
+        if (btn) btn.addEventListener('click', e => { e.stopPropagation(); launch(color); });
+        card.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); launch(color); }});
+      });
+      // time control selection
+      document.querySelectorAll('.time-btn').forEach(button => {
+        button.addEventListener('click', () => {
+          document.querySelectorAll('.time-btn').forEach(b=>{ b.classList.remove('selected'); b.setAttribute('aria-pressed','false'); });
+          button.classList.add('selected');
+          button.setAttribute('aria-pressed','true');
+        });
+      });
+    })();
+  </script>
+</body>
+</html>
