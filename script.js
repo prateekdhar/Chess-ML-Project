@@ -1569,12 +1569,27 @@ function updateModelWeightsFromTF(){
         Queen: combine([4,10]),
         King: combine([5,11])
     };
-    [...tbody.querySelectorAll('tr')].forEach(tr=>{
+    const rows = [...tbody.querySelectorAll('tr')];
+    rows.forEach(tr=>{
         const f = tr.querySelector('td[data-feature]');
         const wcell = tr.querySelector('td[data-weightCell]');
         if (f && wcell && featureValues[f.dataset.feature] !== undefined){
-            wcell.textContent = featureValues[f.dataset.feature].toFixed(3);
+            const valStr = featureValues[f.dataset.feature].toFixed(3);
+            const before = wcell.textContent;
+            wcell.textContent = valStr;
+            console.log('[tf-engine] set weight', f.dataset.feature, 'before=', before, 'after=', wcell.textContent);
         }
+    });
+    // Retry pass next frame in case something overwrote (defensive)
+    requestAnimationFrame(()=>{
+        rows.forEach(tr=>{
+            const f = tr.querySelector('td[data-feature]');
+            const wcell = tr.querySelector('td[data-weightCell]');
+            if (f && wcell && wcell.textContent.trim()==='-') {
+                const v = featureValues[f.dataset.feature];
+                if (v !== undefined) { wcell.textContent = v.toFixed(3); console.log('[tf-engine] retry fixed hyphen for', f.dataset.feature); }
+            }
+        });
     });
     console.log('[tf-engine] weights updated');
     // Update meta text
