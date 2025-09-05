@@ -1592,6 +1592,25 @@ function updateModelWeightsFromTF(){
                 if (v !== undefined) { wcell.textContent = v.toFixed(3); console.log('[tf-engine] retry fixed hyphen for', f.dataset.feature); }
             }
         });
+        // If still all hyphens, rebuild tbody entirely as a fallback
+        const stillAll = rows.every(tr=>{
+            const wcell = tr.querySelector('td[data-weightCell]');
+            return wcell && wcell.textContent.trim() === '-';
+        });
+        if (stillAll) {
+            console.warn('[tf-engine] fallback rebuild of weight table');
+            const tbody = document.getElementById('model-weight-body');
+            if (tbody) {
+                const featureOrder = Object.keys(featureValues);
+                tbody.innerHTML = '';
+                featureOrder.forEach(fName=>{
+                    const tr = document.createElement('tr');
+                    const tdF = document.createElement('td'); tdF.textContent = fName; tdF.dataset.feature = fName;
+                    const tdW = document.createElement('td'); tdW.dataset.weightCell='1'; tdW.textContent = featureValues[fName].toFixed(3);
+                    tr.appendChild(tdF); tr.appendChild(tdW); tbody.appendChild(tr);
+                });
+            }
+        }
     });
     console.log('[tf-engine] weights updated');
     // Update meta text
