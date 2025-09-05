@@ -199,15 +199,29 @@ async function trainModelOnSamples(){
             tfValueModel.compile({optimizer:'adam', loss:'meanSquaredError'});
             console.log('[tf-engine] compile safeguard applied before training');
         }
+        const checksumBefore = firstLayerChecksum();
         // Build tensors
         const xs = tf.tensor2d(tfTrainingSamples.map(s=>Array.from(s.input)));
         const ys = tf.tensor2d(tfTrainingSamples.map(s=>[s.target]));
-        await tfValueModel.fit(xs, ys, {epochs:3, batchSize: Math.min(32, tfTrainingSamples.length), verbose:0});
+        console.log('[tf-engine] training start: samples=', tfTrainingSamples.length, 'batchSize=', Math.min(32, tfTrainingSamples.length));
+        await tfValueModel.fit(xs, ys, {
+            epochs: 3,
+            batchSize: Math.min(32, tfTrainingSamples.length),
+            verbose: 0,
+            callbacks: {
+                onEpochEnd: (epoch, logs)=>{
+                    console.log('[tf-engine] epoch', epoch+1, 'loss=', Number(logs?.loss).toFixed(5));
+                }
+            }
+        });
         xs.dispose(); ys.dispose();
         tfGamesTrained++;
         // Persist updated weights
         try { await tfValueModel.save('indexeddb://tf-chess-eval'); } catch(_) {}
         updateModelWeightsFromTF();
+        const checksumAfter = firstLayerChecksum();
+        const delta = (checksumAfter - checksumBefore);
+        console.log('[tf-engine] training complete. checksum L1 before=', checksumBefore.toFixed(6), 'after=', checksumAfter.toFixed(6), 'delta=', delta.toFixed(6));
         if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Trained on '+tfGamesTrained+' game'+(tfGamesTrained===1?'':'s')+'</span>';
     } catch(e){
         console.warn('[tf-engine] training failed', e);
@@ -218,6 +232,16 @@ async function trainModelOnSamples(){
         if (tfTrainingSamples.length > 800) tfTrainingSamples = tfTrainingSamples.slice(-800);
         setTimeout(()=>{ const m=document.querySelector('#model-info-panel .model-meta'); if (m && /Trained on|Train failed/.test(m.innerHTML)) { m.innerHTML='Engine: TFValueNet<br><span class="note">Layer0 avg</span>'; } }, 2200);
     }
+}
+
+function firstLayerChecksum(){
+    try {
+        if (!tfValueModel || !tfValueModel.layers || !tfValueModel.layers[0]) return 0;
+        const w = tfValueModel.layers[0].getWeights?.()[0];
+        if (!w) return 0;
+        const d = w.dataSync(); let s=0; for (let i=0;i<d.length;i++){ s += Math.abs(d[i]); }
+        return s;
+    } catch(_) { return 0; }
 }
 
 function encodeBoardForTF(){
