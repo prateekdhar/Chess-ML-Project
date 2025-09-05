@@ -1,6 +1,7 @@
 const chessboard = document.querySelector('.chessboard');
 const historyBody = document.getElementById('history-body');
 const resultBanner = document.getElementById('result-banner');
+const newGameBtn = document.getElementById('new-game-btn');
 const historyWrapper = document.querySelector('.history-wrapper');
 const themeToggleInput = document.getElementById('theme-toggle');
 // Navigation buttons (may not exist if HTML not updated yet)
@@ -67,6 +68,7 @@ let gameOver = false; // flag to stop interaction after checkmate
 let moveHistory = []; // stores { ply, san, fullMoveNumber, color }
 let positionHistory = []; // FEN positions (initial + after each move)
 let currentPositionIndex = 0; // pointer into positionHistory
+let promotionPending = false; // blocks AI move until user picks promotion piece
 // Clock / Timer state
 let baseMinutes = 0; // 0 = unlimited
 let whiteTimeMs = 0;
@@ -76,6 +78,72 @@ let clockRunning = false;
 const clockWhiteEl = document.getElementById('clock-white');
 const clockBlackEl = document.getElementById('clock-black');
 // Removed unified wrapper; clocks positioned around board
+
+// --- Sound Effect Setup (with autoplay unlock) ---
+let soundEnabled = true;
+let moveAudio = null;
+let captureAudio = null;
+let audioUnlocked = false;
+let pendingSound = null; // {capture:boolean}
+function initMoveSound(){
+    if (!moveAudio) {
+        moveAudio = new Audio('sounds/normal_moves.mp3');
+        moveAudio.preload = 'auto';
+        moveAudio.volume = 0.55;
+    }
+    if (!captureAudio) {
+        captureAudio = new Audio('sounds/Capture.mp3');
+        captureAudio.preload = 'auto';
+        captureAudio.volume = 0.65;
+    }
+    try {
+        const mv = moveAudio.volume, cv = captureAudio.volume;
+        moveAudio.volume = 0; captureAudio.volume = 0;
+        Promise.allSettled([moveAudio.play(), captureAudio.play()]).then(()=>{
+            moveAudio.pause(); captureAudio.pause();
+            moveAudio.currentTime = 0; captureAudio.currentTime = 0;
+            moveAudio.volume = mv; captureAudio.volume = cv;
+            audioUnlocked = true;
+            if (pendingSound){ const cap = pendingSound.capture; pendingSound=null; playMoveSound(cap); }
+        }).catch(()=>{});
+    } catch(_) {}
+}
+initMoveSound();
+const soundToggleBtn = document.getElementById('sound-toggle');
+if (soundToggleBtn){
+    soundToggleBtn.addEventListener('click', ()=>{
+        soundEnabled = !soundEnabled;
+        soundToggleBtn.setAttribute('aria-pressed', String(soundEnabled));
+        soundToggleBtn.innerHTML = soundEnabled ? '🔊' : '🔇';
+    });
+}
+function playMoveSound(isCapture=false){
+    if (!soundEnabled) return;
+    if (!audioUnlocked) { pendingSound = {capture:isCapture}; return; }
+    const audio = isCapture ? captureAudio : moveAudio;
+    if (!audio) return;
+    try { audio.currentTime = 0; audio.play(); } catch(_) {}
+}
+['pointerdown','keydown','touchstart'].forEach(evt=>{
+    window.addEventListener(evt, function once(){
+        if (audioUnlocked) return;
+        try {
+            moveAudio.play().then(()=>{ moveAudio.pause(); moveAudio.currentTime=0; audioUnlocked=true; if (pendingSound){ const cap=pendingSound.capture; pendingSound=null; playMoveSound(cap);} });
+        } catch(_) {}
+        window.removeEventListener(evt, once, true);
+    }, true);
+});
+
+// --- Simple Random Opponent State ---
+let aiEnabled = true; // always enable simple random opponent for now
+let playerColorChoice = 'White';
+try { playerColorChoice = localStorage.getItem('playerColor') || 'White'; } catch(_) {}
+// Player choice determines orientation only; random AI plays the opposite color
+aiEnabled = true;
+const aiColor = (playerColorChoice === 'White') ? 'Black' : 'White';
+// Track when an AI move is executing (for auto-promotion logic)
+let aiMoveExecuting = false;
+let aiAutoPromotion = null; // {row,col,finalPiece,letter}
 
 function initClocks() {
     let stored = null; try { stored = localStorage.getItem('timeControlMinutes'); } catch(_) {}
@@ -147,6 +215,7 @@ function endGameOnTime(winnerColor) {
     clockRunning = false;
     const loser = winnerColor === 'White' ? 'Black' : 'White';
     if (resultBanner) resultBanner.textContent = winnerColor + ' wins on time';
+    if (newGameBtn) newGameBtn.style.display = 'block';
     console.log('[clock] time over for', loser);
 }
 
@@ -511,13 +580,33 @@ function evaluateCheckState(updateLast = false) {
         last.san = last.san.replace(/[+#]+$/, '');
         if (inCheck && !hasMove) {
             last.san += '#';
-            if (resultBanner) resultBanner.textContent = (last.color === 'White' ? 'White' : 'Black') + ' wins by checkmate';
+            if (resultBanner) {
+                resultBanner.textContent = (last.color === 'White' ? 'White' : 'Black') + ' wins by checkmate';
+                resultBanner.classList.add('visible');
+            }
+            if (newGameBtn) newGameBtn.style.display = 'block';
             gameOver = true;
         } else if (inCheck) {
             last.san += '+';
+        } else if (!inCheck && !hasMove) {
+            // stalemate
+            if (resultBanner) {
+                resultBanner.textContent = 'Draw by stalemate';
+                resultBanner.classList.add('visible');
+            }
+            if (newGameBtn) newGameBtn.style.display = 'block';
+            gameOver = true;
         }
         renderHistory();
     }
+}
+
+if (newGameBtn){
+    newGameBtn.addEventListener('click', ()=>{
+        // Optional: clear stored side so user chooses again
+        try { localStorage.removeItem('playerColor'); } catch(_) {}
+        window.location.href = 'landing.html';
+    });
 }
 
 // Remove existing move indicators
@@ -698,6 +787,31 @@ function movePieceTo(fromRow, fromCol, toRow, toCol) {
     // Record move before flipping turn
     recordMove(img.dataset.piece, fromRow, fromCol, toRow, toCol, capturedPiece, false, false, special);
 
+    // Finalize any queued AI auto-promotion (promotion decided instantly by engine)
+    if (aiAutoPromotion && aiAutoPromotion.row === toRow && aiAutoPromotion.col === toCol) {
+        const finalPiece = aiAutoPromotion.finalPiece;
+        pieces[toRow][toCol] = finalPiece;
+        if (img) {
+            img.src = pieceFilename(finalPiece);
+            img.alt = finalPiece;
+            img.dataset.piece = finalPiece;
+        }
+        const last = moveHistory[moveHistory.length -1];
+        if (last && !/=/.test(last.san)) {
+            const m = last.san.match(/([+#]+)$/);
+            if (m) {
+                last.san = last.san.slice(0, -m[0].length) + '=' + aiAutoPromotion.letter + m[0];
+            } else {
+                last.san += '=' + aiAutoPromotion.letter;
+            }
+            renderHistory();
+        }
+        aiAutoPromotion = null;
+    }
+
+    // Play move sound (capture vs normal)
+    playMoveSound(!!capturedPiece || enPassantCapture);
+
     turn = turn === 'White' ? 'Black' : 'White';
     activeSelection = null;
 
@@ -709,9 +823,18 @@ function movePieceTo(fromRow, fromCol, toRow, toCol) {
     // Save new position in history after evaluation (so check markers already applied to SAN)
     saveCurrentPositionFEN();
     currentPositionIndex = positionHistory.length - 1;
+    // Update material balance after each completed move
+    if (typeof updateMaterialBalance === 'function') {
+        try { updateMaterialBalance(); } catch(_) {}
+    }
     updateNavDisabled();
     // Switch and start clocks for next player
     switchClockAfterMove();
+
+    // Trigger AI reply if enabled and it's now the AI's turn (supports AI as White or Black)
+    if (!promotionPending && aiEnabled && turn === aiColor && currentPositionIndex === positionHistory.length -1) {
+        setTimeout(()=> maybeTriggerAI(), 400);
+    }
 }
 
 // Clear indicators when clicking outside
@@ -757,6 +880,28 @@ function setupBoard() {
                 img.addEventListener('dragstart', (e) => {
                     selectedPiece = e.target;
                     selectedSquare = square;
+                    // Provide a custom drag image so rotation stacking doesn't flip the sprite
+                    if (document.body.classList.contains('board-flipped') && e.dataTransfer) {
+                        try {
+                            const clone = e.target.cloneNode(true);
+                            clone.style.transform = 'none';
+                            clone.style.position = 'absolute';
+                            clone.style.top = '-200px';
+                            clone.style.left = '-200px';
+                            clone.style.pointerEvents = 'none';
+                            clone.style.width = e.target.clientWidth + 'px';
+                            clone.style.height = e.target.clientHeight + 'px';
+                            document.body.appendChild(clone);
+                            e.dataTransfer.setDragImage(clone, clone.clientWidth/2, clone.clientHeight/2);
+                            e.target._dragClone = clone;
+                        } catch(_) {}
+                    }
+                });
+                img.addEventListener('dragend', (e)=>{
+                    if (e.target._dragClone) {
+                        try { document.body.removeChild(e.target._dragClone); } catch(_) {}
+                        delete e.target._dragClone;
+                    }
                 });
 
                 // Click handler to show legal moves
@@ -855,6 +1000,13 @@ function handleCastling(fromRow, fromCol, toRow, toCol) {
 
 function handlePawnPromotion(row, col, piece) {
     if ((piece.includes("White") && row === 0) || (piece.includes("Black") && row === 7)) {
+        const color = piece.includes("White") ? "White" : "Black";
+        // If it's the AI's pawn, auto-promote (always to Queen for now)
+        if (aiMoveExecuting && color === aiColor) {
+            aiAutoPromotion = { row, col, finalPiece: color + ' Queen', letter: 'Q' };
+            return; // defer finalization until after recordMove
+        }
+        promotionPending = true;
         const promotionOptions = ["Queen", "Rook", "Bishop", "Knight"];
         const promotionScreen = document.createElement('div');
         promotionScreen.className = 'promotion-screen';
@@ -924,7 +1076,37 @@ function handlePawnPromotion(row, col, piece) {
                     // Critical: update dataset so future move generation treats it as new piece type
                     pawnImg.dataset.piece = finalPiece;
                 }
+                // Update last move SAN to include promotion (e.g., e8=Q)
+                if (moveHistory.length) {
+                    const last = moveHistory[moveHistory.length -1];
+                    // Only modify if it was a pawn move without existing = sign
+                    if (!/=/.test(last.san)) {
+                        const promoLetterMap = { Queen:'Q', Rook:'R', Bishop:'B', Knight:'N' };
+                        const letter = promoLetterMap[option] || option[0].toUpperCase();
+                        // Insert before check/mate symbols if present
+                        const m = last.san.match(/([+#]+)$/);
+                        if (m) {
+                            last.san = last.san.slice(0, -m[0].length) + '=' + letter + m[0];
+                        } else {
+                            last.san = last.san + '=' + letter;
+                        }
+                        renderHistory();
+                    }
+                }
+                // Re-evaluate check state in case promotion gives immediate check/mate
+                evaluateCheckState(true);
+                // Replace last FEN (position after move) with updated piece type
+                if (positionHistory.length) {
+                    positionHistory[positionHistory.length -1] = generateFEN();
+                }
                 document.body.removeChild(promotionScreen);
+                promotionPending = false;
+                // Promotion changes material balance
+                if (typeof updateMaterialBalance === 'function') { try { updateMaterialBalance(); } catch(_) {} }
+                // If it's AI's turn now, trigger its move after promotion resolution
+                if (aiEnabled && turn === aiColor && !gameOver) {
+                    setTimeout(()=> maybeTriggerAI(), 300);
+                }
             });
 
             promotionScreen.appendChild(button);
@@ -1102,6 +1284,7 @@ function loadPositionFromFEN(fen) {
     turn = active === 'w' ? 'White' : 'Black';
     enPassant = null; // simplified (not reconstructing EP square)
     rerenderBoard();
+    if (typeof updateMaterialBalance === 'function') { try { updateMaterialBalance(); } catch(_) {} }
 }
 
 function rerenderBoard() {
@@ -1120,6 +1303,30 @@ function rerenderBoard() {
             img.dataset.row = r;
             img.dataset.col = c;
             img.addEventListener('dragstart', (e)=>{ selectedPiece = e.target; selectedSquare = square; });
+            img.addEventListener('dragstart', (e) => {
+                // Provide custom drag image when flipped (same logic as initial setup)
+                if (document.body.classList.contains('board-flipped') && e.dataTransfer) {
+                    try {
+                        const clone = e.target.cloneNode(true);
+                        clone.style.transform = 'none';
+                        clone.style.position = 'absolute';
+                        clone.style.top = '-200px';
+                        clone.style.left = '-200px';
+                        clone.style.pointerEvents = 'none';
+                        clone.style.width = e.target.clientWidth + 'px';
+                        clone.style.height = e.target.clientHeight + 'px';
+                        document.body.appendChild(clone);
+                        e.dataTransfer.setDragImage(clone, clone.clientWidth/2, clone.clientHeight/2);
+                        e.target._dragClone = clone;
+                    } catch(_) {}
+                }
+            });
+            img.addEventListener('dragend', (e)=>{
+                if (e.target._dragClone) {
+                    try { document.body.removeChild(e.target._dragClone); } catch(_) {}
+                    delete e.target._dragClone;
+                }
+            });
             img.addEventListener('click', (e)=>{
                 e.stopPropagation();
                 if (gameOver) return;
@@ -1153,6 +1360,32 @@ function updateNavDisabled() {
     btnNext.disabled = atEnd; btnLast.disabled = atEnd;
 }
 
+// ---- Random AI Helper ----
+function maybeTriggerAI(){
+    if (!aiEnabled) return;
+    if (turn !== aiColor) return; // wait until AI's turn
+    // Gather all legal moves for AI color
+    const aiPieces = [];
+    for (let r=0;r<8;r++) {
+        for (let c=0;c<8;c++) {
+            const p = pieces[r][c];
+            if (p && p.includes(aiColor)) aiPieces.push({p,r,c});
+        }
+    }
+    const allMoves = [];
+    aiPieces.forEach(obj => {
+        const ms = getLegalMoves(obj.p, obj.r, obj.c);
+        ms.forEach(([tr,tc]) => allMoves.push({fromR:obj.r, fromC:obj.c, toR:tr, toC:tc}));
+    });
+    if (!allMoves.length) return; // stalemate or checkmate handled elsewhere
+    const choice = allMoves[Math.floor(Math.random() * allMoves.length)];
+    setTimeout(()=> {
+        aiMoveExecuting = true;
+        try { movePieceTo(choice.fromR, choice.fromC, choice.toR, choice.toC); } finally { aiMoveExecuting = false; }
+        playMoveSound(false);
+    }, 350); // ensure sound after AI move
+}
+
 function highlightSelectedRow(rowEl) {
     if (!historyBody) return;
     historyBody.querySelectorAll('tr.selected-move').forEach(r=> r.classList.remove('selected-move'));
@@ -1177,3 +1410,116 @@ if (baseMinutes > 0) {
     highlightActiveClock();
     startActiveClock();
 }
+
+// If player chose Black, AI plays White and should move first.
+try {
+    const storedColor = localStorage.getItem('playerColor') || 'White';
+    if (storedColor === 'Black') {
+        // Ensure orientation already applied earlier.
+        // AI is White; trigger its first move after slight delay.
+        setTimeout(()=> {
+            // Force attempt to unlock audio by simulating a silent play if still locked
+            if (!audioUnlocked) {
+                try {
+                    moveAudio.volume = 0;
+                    moveAudio.play().then(()=>{ moveAudio.pause(); moveAudio.currentTime=0; moveAudio.volume = 0.55; audioUnlocked=true; });
+                } catch(_) {}
+            }
+            maybeTriggerAI();
+        }, 500);
+    }
+} catch(_) {}
+
+// ----- Model Parameters Panel Population (random engine placeholder) -----
+(function populateModelWeights(){
+    const tbody = document.getElementById('model-weight-body');
+    if (!tbody) return;
+    // Define a representative set of feature weights; all set to 1
+    const featureWeights = {
+        Material:1,
+        Mobility:1,
+        KingSafety:1,
+        CenterControl:1,
+        PawnStructure:1,
+        PieceActivity:1,
+        Pawn:1,
+        Knight:1,
+        Bishop:1,
+        Rook:1,
+        Queen:1,
+        King:1
+    };
+    tbody.innerHTML = '';
+    Object.entries(featureWeights).forEach(([k,v]) => {
+        const tr = document.createElement('tr');
+        const tdF = document.createElement('td'); tdF.textContent = k;
+        const tdW = document.createElement('td'); tdW.textContent = v;
+        tr.appendChild(tdF); tr.appendChild(tdW);
+        tbody.appendChild(tr);
+    });
+})();
+
+// ------- Material Balance (appended) -------
+function updateMaterialBalance(){
+    const diffEl = document.getElementById('material-diff');
+    const capWhiteEl = document.getElementById('captured-by-white');
+    const capBlackEl = document.getElementById('captured-by-black');
+    if (!diffEl) return;
+    const startCounts = { Pawn:8, Knight:2, Bishop:2, Rook:2, Queen:1 };
+    const counts = { White:{ Pawn:0,Knight:0,Bishop:0,Rook:0,Queen:0 }, Black:{ Pawn:0,Knight:0,Bishop:0,Rook:0,Queen:0 } };
+    for (let r=0;r<8;r++) {
+        for (let c=0;c<8;c++) {
+            const p = pieces[r][c];
+            if (!p) continue;
+            const [color,type] = p.split(' ');
+            if (counts[color] && counts[color][type] !== undefined) counts[color][type]++;
+        }
+    }
+    const values = { Pawn:1, Knight:3, Bishop:3, Rook:5, Queen:9 };
+    let whiteScore=0, blackScore=0;
+    Object.keys(values).forEach(t=>{ whiteScore += counts.White[t]*values[t]; blackScore += counts.Black[t]*values[t]; });
+    const diff = whiteScore - blackScore;
+    if (diff === 0){ diffEl.textContent='='; diffEl.classList.add('equal'); diffEl.style.color=''; }
+    else { diffEl.classList.remove('equal'); diffEl.textContent=(diff>0?'+':'')+diff; diffEl.style.color = diff>0? '#2d6a2d' : '#8c1f1f'; }
+    // Helper to append icons with optional grouping once duplicates exceed a threshold
+    function renderCaptured(container, victimColorCounts, colorPrefix){
+        container.innerHTML='';
+        Object.keys(startCounts).forEach(t=>{
+            const missing = startCounts[t] - victimColorCounts[t];
+            if (missing <= 0) return;
+            if (missing <= 6) { // show individually
+                for (let i=0;i<missing;i++) {
+                    const img=document.createElement('img');
+                    img.src='sprites/'+colorPrefix+'_'+t+'.png';
+                    img.alt='Captured '+t;
+                    container.appendChild(img);
+                }
+            } else {
+                // group icon + small count badge
+                const img=document.createElement('div');
+                img.style.position='relative';
+                img.style.width='18px'; img.style.height='18px';
+                img.style.flex='0 0 auto';
+                img.style.background=`center/contain no-repeat url('sprites/${colorPrefix}_${t}.png')`;
+                const badge=document.createElement('span');
+                badge.textContent='x'+missing;
+                badge.style.position='absolute';
+                badge.style.right='-2px';
+                badge.style.bottom='-6px';
+                badge.style.fontSize='10px';
+                badge.style.fontWeight='700';
+                badge.style.background='rgba(0,0,0,0.55)';
+                badge.style.color='#fff';
+                badge.style.padding='0 2px';
+                badge.style.borderRadius='4px';
+                img.appendChild(badge);
+                container.appendChild(img);
+            }
+        });
+    }
+    if (capWhiteEl) renderCaptured(capWhiteEl, counts.Black, 'Black');
+    if (capBlackEl) renderCaptured(capBlackEl, counts.White, 'White');
+}
+
+// Initial material balance render attempt
+try { updateMaterialBalance(); } catch(_) {}

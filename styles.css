@@ -103,6 +103,9 @@ body.board-flipped .clock-bottom { top:-44px; bottom:auto; }
     grid-template-columns: repeat(8, 80px);
     grid-template-rows: repeat(8, 80px);
     border: 2px solid black;
+    border-radius: 2px; /* slight rounding */
+    overflow: hidden; /* ensure inner squares respect rounding */
+    box-shadow: 0 4px 10px rgba(0,0,0,0.25), 0 1px 3px rgba(0,0,0,0.35); /* elevation */
     transition: transform .5s ease;
 }
 
@@ -262,3 +265,92 @@ body.dark .nav-controls .nav-btn:hover:not(:disabled) { background: linear-gradi
 
 body.dark .theme-toggle-label { background: linear-gradient(135deg, #4b362a, #241913); color: var(--text-color); }
 body.dark .theme-toggle-label .knob { background: var(--square-light); }
+
+/* New Game button styling */
+#new-game-btn {
+    background: var(--panel-border);
+    color: var(--square-light);
+    border: 2px solid var(--panel-border);
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-family: 'Roboto', sans-serif;
+    font-weight: 600;
+    font-size: 14px;
+    cursor: pointer;
+    letter-spacing: .5px;
+    transition: background .25s ease, color .25s ease, transform .15s ease, box-shadow .25s ease;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+}
+#new-game-btn:hover { background: linear-gradient(135deg, var(--panel-border), var(--square-dark)); }
+#new-game-btn:active { transform: translateY(1px); box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
+#new-game-btn:focus-visible { outline: 3px solid var(--accent-red); outline-offset: 2px; }
+
+/* Dark mode variant for contrast */
+body.dark #new-game-btn {
+    background: var(--square-light);
+    color: var(--square-dark);
+    border-color: var(--square-light);
+    box-shadow: 0 2px 6px rgba(0,0,0,0.55);
+}
+body.dark #new-game-btn:hover { background: linear-gradient(135deg, var(--square-light), #e3dcc4); }
+body.dark #new-game-btn:active { transform: translateY(1px); }
+
+/* Model info panel (tile) */
+#model-info-panel {
+    width: 200px;
+    background: var(--panel-bg); /* themed */
+    border: 2px solid var(--panel-border);
+    border-radius: 12px; /* slightly more rounded */
+    padding: 14px 16px 16px;
+    font-family: 'Roboto', sans-serif;
+    display: flex;
+    flex-direction: column;
+    max-height: 660px;
+    position: relative;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.18), 0 1px 2px rgba(0,0,0,0.12);
+    gap: 8px;
+}
+body.dark #model-info-panel { background: var(--panel-bg); box-shadow: 0 4px 14px rgba(0,0,0,0.55); }
+#model-info-panel .model-header {
+    margin:0;
+    font-size:15px;
+    font-weight:700;
+    color: var(--text-color);
+    letter-spacing:.5px;
+    text-transform:uppercase;
+}
+#model-info-panel .model-meta { font-size:11px; line-height:1.3; opacity:.85; }
+#model-info-panel .model-meta .note { font-style:italic; font-size:10px; opacity:.9; }
+#model-info-panel .model-weights-wrapper { flex:1; overflow-y:auto; border:1px solid #e1d9c9; border-radius:4px; }
+#model-info-panel table.model-weights { width:100%; border-collapse:collapse; font-size:11px; }
+#model-info-panel table.model-weights thead { position:sticky; top:0; background: var(--square-dark); color: var(--square-light); }
+#model-info-panel table.model-weights th, #model-info-panel table.model-weights td { padding:4px 6px; text-align:left; }
+#model-info-panel table.model-weights tbody tr:nth-child(odd) { background: var(--history-odd); }
+#model-info-panel table.model-weights tbody tr:nth-child(even) { background: var(--history-even); }
+#model-info-panel table.model-weights tbody tr:hover { background: rgba(200,40,40,0.15); }
+body.dark #model-info-panel table.model-weights tbody tr:hover { background: rgba(185,178,146,0.18); }
+
+/* Material balance rows: horizontal scroll with tiny piece icons */
+#material-balance { font-family:'Roboto',sans-serif; }
+#material-balance .captured-row {
+    display: flex;
+    flex-direction: row;
+    gap: 2px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+    padding: 2px 0 4px;
+    max-width: 100%;
+}
+#material-balance .captured-row img {
+    width: 18px;
+    height: 18px;
+    object-fit: contain;
+    flex: 0 0 auto;
+    filter: drop-shadow(0 0 1px rgba(0,0,0,0.4));
+}
+body.dark #material-balance .captured-row img { filter: drop-shadow(0 0 1px rgba(0,0,0,0.6)); }
+#material-balance .material-diff.equal { opacity:.75; }
+
+
+

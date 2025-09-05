@@ -4,27 +4,71 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Chessboard</title>
+    <!-- (Removed external ML libraries; random AI only) -->
     <script>
-        // Redirect to landing page if no side chosen yet
+        // Always force user through landing unless side explicitly in URL
         (function(){
+            const path = window.location.pathname;
+            const isIndex = /index\.html$/.test(path) || /\/$/.test(path);
+            if (!isIndex) return;
             try {
                 const params = new URLSearchParams(window.location.search);
-                const hasSide = params.has('side');
-                const stored = localStorage.getItem('playerColor');
-                if (!hasSide && !stored) {
+                const side = params.get('side');
+                if (!side) {
                     window.location.replace('landing.html');
                 }
-            } catch(e) {
+            } catch(e){
                 window.location.replace('landing.html');
             }
         })();
     </script>
     <!-- Tailwind CDN for utility classes (odd/even row styling) -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="styles.css?v=20250903d">
+    <link rel="stylesheet" href="styles.css?v=20250905a">
 </head>
 <body>
     <div class="app-layout">
+        <!-- Model parameters tile (left of board) -->
+    <div id="model-info-panel" aria-label="Model parameters and weights" role="region" style="border:2px solid var(--panel-border);border-radius:12px;padding:14px 16px 16px;box-shadow:0 4px 12px rgba(0,0,0,0.18),0 1px 2px rgba(0,0,0,0.12);">
+            <div class="model-header">Model Weights</div>
+            <div class="model-meta">Engine: RandomMoveSelector<br><span class="note">All weights = 1</span></div>
+            <div class="model-weights-wrapper">
+                <table class="model-weights" aria-label="Model feature weights">
+                    <thead><tr><th>Feature</th><th>W</th></tr></thead>
+                    <tbody id="model-weight-body">
+                        <tr><td>Material</td><td>1</td></tr>
+                        <tr><td>Mobility</td><td>1</td></tr>
+                        <tr><td>KingSafety</td><td>1</td></tr>
+                        <tr><td>CenterControl</td><td>1</td></tr>
+                        <tr><td>PawnStructure</td><td>1</td></tr>
+                        <tr><td>PieceActivity</td><td>1</td></tr>
+                        <tr><td>Pawn</td><td>1</td></tr>
+                        <tr><td>Knight</td><td>1</td></tr>
+                        <tr><td>Bishop</td><td>1</td></tr>
+                        <tr><td>Rook</td><td>1</td></tr>
+                        <tr><td>Queen</td><td>1</td></tr>
+                        <tr><td>King</td><td>1</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <!-- Material balance section -->
+            <div id="material-balance" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--panel-border);">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                    <div style="font-weight:600;text-transform:uppercase;font-size:12px;letter-spacing:0.5px;">Material</div>
+                    <div id="material-diff" class="material-diff" aria-label="Material difference" style="font-weight:700;font-size:14px;min-width:28px;text-align:right;">=</div>
+                </div>
+                <div class="captured-pieces" style="display:flex;flex-direction:column;gap:6px;">
+                    <div style="display:flex;flex-direction:column;">
+                        <div style="font-size:11px;font-weight:600;opacity:0.8;">Captured by White</div>
+                        <div id="captured-by-white" class="captured-row" style="min-height:22px;"></div>
+                    </div>
+                    <div style="display:flex;flex-direction:column;">
+                        <div style="font-size:11px;font-weight:600;opacity:0.8;">Captured by Black</div>
+                        <div id="captured-by-black" class="captured-row" style="min-height:22px;"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
         <div class="board-wrapper" style="position:relative;display:inline-block;">
             <div class="chessboard">
                 <!-- Chessboard squares and pieces will be dynamically added here -->
@@ -51,6 +95,9 @@
                         <span class="knob" aria-hidden="true"></span>
                     </label>
                 </div>
+                <button id="sound-toggle" type="button" aria-pressed="true" title="Toggle sound" style="margin-left:4px;border:none;background:var(--panel-border);color:var(--square-light);padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;display:flex;align-items:center;gap:4px;">
+                    <span class="sound-on">🔊</span>
+                </button>
             </div>
             <div class="history-wrapper">
                 <table id="history-table" class="history-table w-full" aria-live="polite">
@@ -67,8 +114,12 @@
                 <button id="nav-last" type="button" class="nav-btn" title="Latest position" aria-label="Latest Position">⏭️</button>
             </div>
             <div id="result-banner" class="result-banner" role="status" aria-live="polite"></div>
+            <div style="margin-top:8px;text-align:center;">
+                <button id="new-game-btn" type="button" style="display:none; width:100%;">New Game</button>
+            </div>
         </aside>
     </div>
     <script src="script.js?v=20250903d"></script>
+    <script src="ml.js?v=20250903"></script>
 </body>
 </html>
