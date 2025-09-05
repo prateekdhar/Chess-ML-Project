@@ -1536,13 +1536,13 @@ try {
 })();
 
 function updateModelWeightsFromTF(){
-    if (!tfValueModel) return;
+    if (!tfValueModel) { console.warn('[tf-engine] updateModelWeightsFromTF: model not ready'); return; }
     const tbody = document.getElementById('model-weight-body');
     if (!tbody) return;
     const firstLayer = tfValueModel.layers[0];
     if (!firstLayer) return;
     const w = firstLayer.getWeights()[0]; // kernel (inputDim x units)
-    if (!w) return;
+    if (!w) { console.warn('[tf-engine] no kernel weights'); return; }
     const data = w.dataSync();
     const inputDim = w.shape[0];
     const units = w.shape[1];
@@ -1576,6 +1576,7 @@ function updateModelWeightsFromTF(){
             wcell.textContent = featureValues[f.dataset.feature].toFixed(3);
         }
     });
+    console.log('[tf-engine] weights updated');
     // Update meta text
     const meta = document.querySelector('#model-info-panel .model-meta');
     if (meta) meta.innerHTML = `Engine: TFValueNet<br><span class="note">Layer0 avg | rows:${inputDim} units:${units}</span>`;
@@ -1616,6 +1617,17 @@ if (refreshBtn){
         setTimeout(()=>{ const m=document.querySelector('#model-info-panel .model-meta'); if (m && /Updated|failed/.test(m.innerHTML)) { m.innerHTML='Engine: TFValueNet<br><span class="note">Layer0 avg</span>'; } }, 2500);
     });
 }
+
+// Auto retry once after a short delay if still hyphens
+setTimeout(()=>{
+    const tbody = document.getElementById('model-weight-body');
+    if (!tbody) return;
+    const allDashes = Array.from(tbody.querySelectorAll('td[data-weightCell]')).every(td=>td.textContent.trim()==='-');
+    if (allDashes) { console.log('[tf-engine] auto-retry weight update'); ensureTFModel().then(()=> updateModelWeightsFromTF()); }
+}, 1500);
+
+// Expose manual helper for debugging
+window.forceUpdateWeights = ()=>{ ensureTFModel().then(()=> updateModelWeightsFromTF()); };
 
 // ------- Material Balance (appended) -------
 function updateMaterialBalance(){
