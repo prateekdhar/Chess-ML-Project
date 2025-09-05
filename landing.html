@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Chess – Choose Side</title>
   <link rel="stylesheet" href="styles.css?v=20250903" />
+  <!-- TensorFlow.js so we can show current saved model weights -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.18.0/dist/tf.min.js"></script>
   <style>
     .landing-container { max-width:420px; margin:60px auto; background: var(--panel-bg); border:2px solid var(--panel-border); border-radius:12px; padding:32px 36px 40px; font-family:'Roboto',sans-serif; box-shadow:0 6px 18px rgba(0,0,0,.18); }
     .landing-container h1 { margin:0 0 12px; font-size:24px; font-weight:600; text-align:center; color: var(--text-color); }
@@ -54,6 +56,23 @@
   <div class="note">Note: White moves first. Choosing Black only flips orientation. The AI stores games locally and trains after each result.</div>
     <div class="footer-links"><a href="index.html">Skip (default White)</a></div>
   </div>
+  <!-- Model Weights Preview Panel -->
+  <div id="landing-weights-panel" aria-label="Current model weights" role="region" style="max-width:420px;margin:26px auto 60px;background:var(--panel-bg);border:2px solid var(--panel-border);border-radius:12px;padding:18px 20px 22px;box-shadow:0 6px 18px rgba(0,0,0,.18);font-family:'Roboto',sans-serif;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;">
+      <div style="font-size:18px;font-weight:600;">Model Weights</div>
+      <div style="display:flex;gap:6px;">
+        <button id="landing-refresh-weights-btn" type="button" class="model-refresh-btn" style="border:none;background:var(--panel-border);color:var(--square-light);padding:6px 10px;border-radius:6px;cursor:pointer;font-weight:600;">↻</button>
+      </div>
+    </div>
+    <div id="landing-weights-meta" class="model-meta" style="font-size:12px;opacity:.85;margin-bottom:8px;">Loading model...</div>
+    <div class="model-weights-wrapper" style="max-height:260px;overflow:auto;">
+      <table class="model-weights" style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead><tr><th style="text-align:left;padding:4px 6px;">Feature</th><th style="text-align:right;padding:4px 6px;">W</th></tr></thead>
+        <tbody id="landing-weight-body"></tbody>
+      </table>
+    </div>
+    <div style="font-size:11px;opacity:.7;margin-top:8px;">Preview of first-layer aggregated magnitudes. Updated from saved local model.</div>
+  </div>
   <script>
     (function(){
       const cards = document.querySelectorAll('.side-card');
@@ -83,6 +102,77 @@
           button.setAttribute('aria-pressed','true');
         });
       });
+    })();
+  </script>
+  <script>
+    (function(){
+      const features = ['Material','Mobility','KingSafety','CenterControl','PawnStructure','PieceActivity','Pawn','Knight','Bishop','Rook','Queen','King'];
+      const tbody = document.getElementById('landing-weight-body');
+      if (tbody){
+        tbody.innerHTML = features.map(f=>`<tr><td data-f="${f}" style="padding:3px 6px;">${f}</td><td data-w="${f}" style="padding:3px 6px;text-align:right;font-variant-numeric:tabular-nums;">...</td></tr>`).join('');
+      }
+      const meta = document.getElementById('landing-weights-meta');
+      let model=null; let modelReady=false; let loading=false;
+      async function ensureModel(){
+        if (modelReady) return model;
+        if (typeof tf === 'undefined'){ if (meta) meta.textContent='tf.js not loaded'; return null; }
+        loading=true;
+        try {
+          const flag = localStorage.getItem('tfEngineModelSaved');
+          if (flag){
+            try { model = await tf.loadLayersModel('indexeddb://tf-chess-eval'); } catch(e){ console.warn('[landing] load failed', e); }
+          }
+          if (!model){
+            model = tf.sequential();
+            model.add(tf.layers.dense({inputShape:[773],units:96,activation:'relu'}));
+            model.add(tf.layers.dense({units:48,activation:'relu'}));
+            model.add(tf.layers.dense({units:1,activation:'tanh'}));
+            model.compile({optimizer:'adam',loss:'meanSquaredError'});
+            try { await model.save('indexeddb://tf-chess-eval'); localStorage.setItem('tfEngineModelSaved','1'); } catch(_){}
+          } else if (!model.optimizer) {
+            model.compile({optimizer:'adam',loss:'meanSquaredError'});
+          }
+          modelReady=true;
+          return model;
+        } finally { loading=false; }
+      }
+      function updateWeights(){
+        if (!model){ return; }
+        const first = model.layers[0]; if (!first){ return; }
+        const w = first.getWeights()[0]; if (!w) return;
+        const data = w.dataSync(); const inputDim = w.shape[0]; const units = w.shape[1];
+        function avgRows(rs,re){ let sum=0,c=0; for (let r=rs;r<re && r<inputDim;r++){ const base=r*units; for (let u=0;u<units;u++){ sum+=Math.abs(data[base+u]); c++; } } return c?sum/c:0; }
+        function planeStart(p){ return p*64; } function planeEnd(p){ return p*64+64; }
+        function avgPlane(p){ return avgRows(planeStart(p), planeEnd(p)); }
+        function combine(planes){ let s=0,c=0; planes.forEach(pl=>{ s+=avgPlane(pl); c++; }); return c? s/c:0; }
+        const centerSquares=[27,28,35,36];
+        function avgCenterAllPlanes(){ let s=0,c=0; for (let pl=0;pl<12;pl++){ centerSquares.forEach(idx=>{ const row=pl*64+idx; if (row<inputDim){ const base=row*units; for (let u=0;u<units;u++){ s+=Math.abs(data[base+u]); c++; } } }); } return c? s/c:0; }
+        const featureValues={
+          Material: avgRows(0,768),
+          Mobility: combine([1,2,3,4,7,8,9,10]),
+          KingSafety: combine([5,11]),
+          CenterControl: avgCenterAllPlanes(),
+          PawnStructure: combine([0,6]),
+          PieceActivity: combine([0,1,2,3,4,6,7,8,9,10]),
+          Pawn: combine([0,6]),
+          Knight: combine([1,7]),
+          Bishop: combine([2,8]),
+          Rook: combine([3,9]),
+          Queen: combine([4,10]),
+          King: combine([5,11])
+        };
+        features.forEach(f=>{ const td = tbody && tbody.querySelector(`td[data-w='${f}']`); if (td && featureValues[f]!=null) td.textContent = featureValues[f].toFixed(3); });
+        if (meta) meta.innerHTML = 'Engine: TFValueNet <span style="opacity:.65;">(saved)</span><br><span class="note">Layer0 avg rows:'+inputDim+' units:'+units+'</span>';
+      }
+      async function init(){
+        if (meta) meta.textContent='Loading model...';
+        await ensureModel();
+        if (!model){ if (meta) meta.textContent='Model unavailable'; return; }
+        updateWeights();
+      }
+      init();
+      const refreshBtn = document.getElementById('landing-refresh-weights-btn');
+      if (refreshBtn){ refreshBtn.addEventListener('click', async ()=>{ if (loading) return; if (meta) meta.textContent='Refreshing...'; await ensureModel(); updateWeights(); }); }
     })();
   </script>
 </body>
