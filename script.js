@@ -141,6 +141,86 @@ try { playerColorChoice = localStorage.getItem('playerColor') || 'White'; } catc
 // Player choice determines orientation only; random AI plays the opposite color
 aiEnabled = true;
 const aiColor = (playerColorChoice === 'White') ? 'Black' : 'White';
+// Engine mode: 'random' or 'tf'
+let engineMode = 'tf';
+let tfValueModel = null;
+let tfModelReady = false;
+async function ensureTFModel(){
+    if (tfModelReady) return tfValueModel;
+    if (typeof tf === 'undefined') { console.warn('[tf-engine] tf.js not loaded, falling back to random'); engineMode='random'; return null; }
+    // Simple tiny model (not trained) for demo; input = 64*12 + sideToMove (same as ml.js concept but simpler mapping)
+    const existing = window.localStorage.getItem('tfEngineModelSaved');
+    if (existing) {
+        try {
+            tfValueModel = await tf.loadLayersModel('indexeddb://tf-chess-eval');
+            tfModelReady = true; return tfValueModel;
+        } catch(e){ console.warn('[tf-engine] load failed', e); }
+    }
+    const model = tf.sequential();
+    model.add(tf.layers.dense({inputShape:[773], units:96, activation:'relu'}));
+    model.add(tf.layers.dense({units:48, activation:'relu'}));
+    model.add(tf.layers.dense({units:1, activation:'tanh'}));
+    model.compile({optimizer:'adam', loss:'meanSquaredError'});
+    tfValueModel = model; tfModelReady = true;
+    try { await model.save('indexeddb://tf-chess-eval'); localStorage.setItem('tfEngineModelSaved','1'); } catch(_) {}
+    updateModelWeightsFromTF();
+    return model;
+}
+
+function encodeBoardForTF(){
+    // 773 features same mapping as ml.js encodeBoard
+    const mapping = { Pawn:0, Knight:1, Bishop:2, Rook:3, Queen:4, King:5 };
+    const arr = new Float32Array(773);
+    for (let r=0;r<8;r++){
+        for (let c=0;c<8;c++){
+            const p = pieces[r][c];
+            if (!p) continue;
+            const [color, type] = p.split(' ');
+            const base = mapping[type];
+            const colorOffset = color === 'White' ? 0 : 6;
+            const idx = (colorOffset + base) * 64 + (r*8+c);
+            arr[idx] = 1;
+        }
+    }
+    arr[768] = (turn === 'White') ? 1 : 0;
+    // remaining indices unused (for parity with ml.js design up to 773 length)
+    return arr;
+}
+
+async function evaluatePositionTF(){
+    if (engineMode !== 'tf') return 0;
+    const model = await ensureTFModel();
+    if (!model) return 0;
+    const enc = encodeBoardForTF();
+    const pred = model.predict(tf.tensor2d([Array.from(enc)]));
+    const data = await pred.data();
+    pred.dispose();
+    return data[0];
+}
+
+async function selectMoveTF(allMoves){
+    const model = await ensureTFModel();
+    if (!model) return allMoves[Math.floor(Math.random()*allMoves.length)];
+    let best = null; let bestScore = -Infinity;
+    for (const mv of allMoves){
+        // simulate move
+        const pieceName = pieces[mv.fromR][mv.fromC];
+        const captured = pieces[mv.toR][mv.toC];
+        pieces[mv.toR][mv.toC] = pieceName;
+        pieces[mv.fromR][mv.fromC] = null;
+        const prevTurn = turn; turn = (turn==='White')?'Black':'White';
+        const enc = encodeBoardForTF();
+        const pred = tfValueModel.predict(tf.tensor2d([Array.from(enc)]));
+        const score = (await pred.data())[0];
+        pred.dispose();
+        // undo
+        turn = prevTurn;
+        pieces[mv.fromR][mv.fromC] = pieceName;
+        pieces[mv.toR][mv.toC] = captured;
+        if (score > bestScore){ bestScore = score; best = mv; }
+    }
+    return best || allMoves[0];
+}
 // Track when an AI move is executing (for auto-promotion logic)
 let aiMoveExecuting = false;
 let aiAutoPromotion = null; // {row,col,finalPiece,letter}
@@ -1378,12 +1458,19 @@ function maybeTriggerAI(){
         ms.forEach(([tr,tc]) => allMoves.push({fromR:obj.r, fromC:obj.c, toR:tr, toC:tc}));
     });
     if (!allMoves.length) return; // stalemate or checkmate handled elsewhere
-    const choice = allMoves[Math.floor(Math.random() * allMoves.length)];
-    setTimeout(()=> {
+    const go = async ()=>{
+        let choice;
+        if (engineMode === 'tf') {
+            try { choice = await selectMoveTF(allMoves); } catch(e){ console.warn('[tf-engine] selection failed, fallback random', e); choice = allMoves[Math.floor(Math.random()*allMoves.length)]; }
+        } else {
+            choice = allMoves[Math.floor(Math.random() * allMoves.length)];
+        }
         aiMoveExecuting = true;
         try { movePieceTo(choice.fromR, choice.fromC, choice.toR, choice.toC); } finally { aiMoveExecuting = false; }
         playMoveSound(false);
-    }, 350); // ensure sound after AI move
+        if (engineMode==='tf') updateModelWeightsFromTF();
+    };
+    setTimeout(go, 250);
 }
 
 function highlightSelectedRow(rowEl) {
@@ -1434,30 +1521,54 @@ try {
 (function populateModelWeights(){
     const tbody = document.getElementById('model-weight-body');
     if (!tbody) return;
-    // Define a representative set of feature weights; all set to 1
-    const featureWeights = {
-        Material:1,
-        Mobility:1,
-        KingSafety:1,
-        CenterControl:1,
-        PawnStructure:1,
-        PieceActivity:1,
-        Pawn:1,
-        Knight:1,
-        Bishop:1,
-        Rook:1,
-        Queen:1,
-        King:1
-    };
-    tbody.innerHTML = '';
-    Object.entries(featureWeights).forEach(([k,v]) => {
-        const tr = document.createElement('tr');
-        const tdF = document.createElement('td'); tdF.textContent = k;
-        const tdW = document.createElement('td'); tdW.textContent = v;
-        tr.appendChild(tdF); tr.appendChild(tdW);
-        tbody.appendChild(tr);
+    tbody.dataset.dynamic='1';
+    const baseFeatures = ['Material','Mobility','KingSafety','CenterControl','PawnStructure','PieceActivity','Pawn','Knight','Bishop','Rook','Queen','King'];
+    tbody.innerHTML='';
+    baseFeatures.forEach(f=>{
+        const tr=document.createElement('tr');
+        const tdF=document.createElement('td'); tdF.textContent=f; tdF.dataset.feature=f;
+        const tdW=document.createElement('td'); tdW.textContent='-'; tdW.dataset.weightCell='1';
+        tr.appendChild(tdF); tr.appendChild(tdW); tbody.appendChild(tr);
     });
 })();
+
+function updateModelWeightsFromTF(){
+    if (!tfValueModel) return;
+    const tbody = document.getElementById('model-weight-body');
+    if (!tbody) return;
+    const firstLayer = tfValueModel.layers[0];
+    if (!firstLayer) return;
+    const w = firstLayer.getWeights()[0]; // kernel tensor
+    if (!w) return;
+    const data = w.dataSync();
+    // Derive simplistic feature magnitudes by slicing kernel rows belonging to piece planes groups
+    // 12 piece planes * 64 = 768 indices, final index 768 = side to move. Map high-level features heuristically.
+    function avgMag(start,end){ let s=0; let c=0; for (let i=start;i<end;i++){ const v=data[i]; s += Math.abs(v); c++; } return (c? (s/c):0).toFixed(3); }
+    const featureValues = {
+        Material: avgMag(0, 768),
+        Mobility: avgMag(0, 256),
+        KingSafety: avgMag(64*5, 64*6),
+        CenterControl: avgMag(64*0 + 27, 64*0 + 37),
+        PawnStructure: avgMag(64*0, 64*1),
+        PieceActivity: avgMag(0, 768),
+        Pawn: avgMag(0,64),
+        Knight: avgMag(64,128),
+        Bishop: avgMag(128,192),
+        Rook: avgMag(192,256),
+        Queen: avgMag(256,320),
+        King: avgMag(320,384)
+    };
+    [...tbody.querySelectorAll('tr')].forEach(tr=>{
+        const f = tr.querySelector('td[data-feature]');
+        const wcell = tr.querySelector('td[data-weightCell]');
+        if (f && wcell && featureValues[f.dataset.feature] !== undefined){
+            wcell.textContent = featureValues[f.dataset.feature];
+        }
+    });
+    // Update meta text
+    const meta = document.querySelector('#model-info-panel .model-meta');
+    if (meta) meta.innerHTML = `Engine: TFValueNet<br><span class="note">Layer0 mag snapshot</span>`;
+}
 
 // ------- Material Balance (appended) -------
 function updateMaterialBalance(){
