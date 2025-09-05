@@ -141,10 +141,9 @@ try { playerColorChoice = localStorage.getItem('playerColor') || 'White'; } catc
 // Player choice determines orientation only; random AI plays the opposite color
 aiEnabled = true;
 const aiColor = (playerColorChoice === 'White') ? 'Black' : 'White';
-// Engine mode: 'random' or 'tf'
+// Engine mode additions
 let engineMode = 'tf';
-let tfValueModel = null;
-let tfModelReady = false;
+let tfValueModel = null; let tfModelReady = false; let tfTrainingSamples = []; let tfGamesTrained = 0;
 async function ensureTFModel(){
     if (tfModelReady) return tfValueModel;
     if (typeof tf === 'undefined') { console.warn('[tf-engine] tf.js not loaded, falling back to random'); engineMode='random'; return null; }
@@ -194,6 +193,7 @@ async function evaluatePositionTF(){
     const enc = encodeBoardForTF();
     const pred = model.predict(tf.tensor2d([Array.from(enc)]));
     const data = await pred.data();
+    pred.dispose();
     pred.dispose();
     return data[0];
 }
@@ -1538,37 +1538,63 @@ function updateModelWeightsFromTF(){
     if (!tbody) return;
     const firstLayer = tfValueModel.layers[0];
     if (!firstLayer) return;
-    const w = firstLayer.getWeights()[0]; // kernel tensor
+    const w = firstLayer.getWeights()[0]; // kernel (inputDim x units)
     if (!w) return;
     const data = w.dataSync();
-    // Derive simplistic feature magnitudes by slicing kernel rows belonging to piece planes groups
-    // 12 piece planes * 64 = 768 indices, final index 768 = side to move. Map high-level features heuristically.
-    function avgMag(start,end){ let s=0; let c=0; for (let i=start;i<end;i++){ const v=data[i]; s += Math.abs(v); c++; } return (c? (s/c):0).toFixed(3); }
+    const inputDim = w.shape[0];
+    const units = w.shape[1];
+    // Helper: average magnitude across rows [rs,re)
+    function avgRows(rs,re){ let sum=0, count=0; for (let r=rs;r<re && r<inputDim;r++){ const base=r*units; for (let c=0;c<units;c++){ sum += Math.abs(data[base+c]); count++; } } return count? (sum/count):0; }
+    // Planes mapping: 0..11 (6 white then 6 black) * 64 squares => 768 rows
+    function planeStart(p){ return p*64; }
+    function planeEnd(p){ return p*64+64; }
+    function avgPlane(p){ return avgRows(planeStart(p), planeEnd(p)); }
+    function combine(planes){ let sum=0, cnt=0; planes.forEach(pl=>{ const v=avgPlane(pl); sum+=v; cnt++; }); return cnt? sum/cnt:0; }
+    const centerSquares = [27,28,35,36]; // within each plane
+    function avgCenterAllPlanes(){ let sum=0, cnt=0; for (let plane=0;plane<12;plane++){ centerSquares.forEach(idx=>{ const row=plane*64+idx; if (row<inputDim){ const base=row*units; for (let c=0;c<units;c++){ sum += Math.abs(data[base+c]); cnt++; } } }); } return cnt? (sum/cnt):0; }
     const featureValues = {
-        Material: avgMag(0, 768),
-        Mobility: avgMag(0, 256),
-        KingSafety: avgMag(64*5, 64*6),
-        CenterControl: avgMag(64*0 + 27, 64*0 + 37),
-        PawnStructure: avgMag(64*0, 64*1),
-        PieceActivity: avgMag(0, 768),
-        Pawn: avgMag(0,64),
-        Knight: avgMag(64,128),
-        Bishop: avgMag(128,192),
-        Rook: avgMag(192,256),
-        Queen: avgMag(256,320),
-        King: avgMag(320,384)
+        Material: avgRows(0,768),
+        Mobility: combine([1,2,3,4,7,8,9,10]),
+        KingSafety: combine([5,11]),
+        CenterControl: avgCenterAllPlanes(),
+        PawnStructure: combine([0,6]),
+        PieceActivity: combine([0,1,2,3,4,6,7,8,9,10]),
+        Pawn: combine([0,6]),
+        Knight: combine([1,7]),
+        Bishop: combine([2,8]),
+        Rook: combine([3,9]),
+        Queen: combine([4,10]),
+        King: combine([5,11])
     };
     [...tbody.querySelectorAll('tr')].forEach(tr=>{
         const f = tr.querySelector('td[data-feature]');
         const wcell = tr.querySelector('td[data-weightCell]');
         if (f && wcell && featureValues[f.dataset.feature] !== undefined){
-            wcell.textContent = featureValues[f.dataset.feature];
+            wcell.textContent = featureValues[f.dataset.feature].toFixed(3);
         }
     });
     // Update meta text
     const meta = document.querySelector('#model-info-panel .model-meta');
-    if (meta) meta.innerHTML = `Engine: TFValueNet<br><span class="note">Layer0 mag snapshot</span>`;
+    if (meta) meta.innerHTML = `Engine: TFValueNet<br><span class="note">Layer0 avg | rows:${inputDim} units:${units}</span>`;
 }
+
+// Early model load so weights appear without waiting for first AI move
+if (engineMode === 'tf') {
+    const meta = document.querySelector('#model-info-panel .model-meta');
+    if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Loading model...</span>';
+    ensureTFModel().then(()=> { try { updateModelWeightsFromTF(); } catch(_){} }).catch(()=>{});
+}
+
+// Allow manual refresh of weights (helpful if async load race)
+document.addEventListener('click', (e)=>{
+    const panel = document.getElementById('model-info-panel');
+    if (!panel) return;
+    if (panel.contains(e.target) && engineMode==='tf') {
+        // If cells still '-', try again
+        const anyDash = !!panel.querySelector('td[data-weightCell]') && Array.from(panel.querySelectorAll('td[data-weightCell]')).every(td=>td.textContent.trim()==='-');
+        if (anyDash) { ensureTFModel().then(()=> updateModelWeightsFromTF()); }
+    }
+});
 
 // ------- Material Balance (appended) -------
 function updateMaterialBalance(){
