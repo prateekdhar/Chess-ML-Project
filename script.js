@@ -152,6 +152,11 @@ async function ensureTFModel(){
     if (existing) {
         try {
             tfValueModel = await tf.loadLayersModel('indexeddb://tf-chess-eval');
+            // Some older saved models may lack training config; recompile if optimizer missing
+            if (!tfValueModel.optimizer) {
+                tfValueModel.compile({optimizer:'adam', loss:'meanSquaredError'});
+                console.log('[tf-engine] loaded model had no optimizer; recompiled');
+            }
             tfModelReady = true; return tfValueModel;
         } catch(e){ console.warn('[tf-engine] load failed', e); }
     }
@@ -188,6 +193,12 @@ async function trainModelOnSamples(){
     const meta = document.querySelector('#model-info-panel .model-meta');
     if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Training '+tfTrainingSamples.length+' pos...</span>';
     try {
+        // Ensure model still compiled (defensive)
+        await ensureTFModel();
+        if (tfValueModel && !tfValueModel.optimizer) {
+            tfValueModel.compile({optimizer:'adam', loss:'meanSquaredError'});
+            console.log('[tf-engine] compile safeguard applied before training');
+        }
         // Build tensors
         const xs = tf.tensor2d(tfTrainingSamples.map(s=>Array.from(s.input)));
         const ys = tf.tensor2d(tfTrainingSamples.map(s=>[s.target]));
