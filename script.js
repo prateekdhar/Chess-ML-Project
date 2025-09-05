@@ -1724,6 +1724,10 @@ if (engineMode === 'tf') {
     ensureTFModel().then(()=> { try { updateModelWeightsFromTF(); } catch(_){} }).catch(()=>{});
 }
 
+// Ensure post-game action block hidden at startup (defensive against cached DOM state)
+const __postGameActions = document.getElementById('post-game-actions');
+if (__postGameActions) __postGameActions.style.display = 'none';
+
 // Allow manual refresh of weights (helpful if async load race)
 document.addEventListener('click', (e)=>{
     const panel = document.getElementById('model-info-panel');
