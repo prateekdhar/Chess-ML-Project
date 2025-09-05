@@ -1761,14 +1761,34 @@ if (refreshBtn){
 const footerTrainBtn = document.getElementById('btn-train-this-game');
 if (footerTrainBtn){
     footerTrainBtn.addEventListener('click', async ()=>{
-        if (!tfCurrentGameSamples.length){ footerTrainBtn.disabled = true; return; }
+        if (tfTrainingInProgress) return;
+        if (!tfCurrentGameSamples.length){
+            footerTrainBtn.textContent = 'No samples from game';
+            footerTrainBtn.disabled = true;
+            setTimeout(()=>{ footerTrainBtn.textContent='Train model on this game'; }, 1800);
+            return;
+        }
+        const gameSampleCount = tfCurrentGameSamples.length;
+        console.log('[tf-engine] manual train clicked; samples=', gameSampleCount, ' existing buffer=', tfTrainingSamples.length);
         // Merge samples into global buffer then train
         tfTrainingSamples = tfTrainingSamples.concat(tfCurrentGameSamples);
         tfCurrentGameSamples = [];
         footerTrainBtn.disabled = true;
+        footerTrainBtn.dataset.originalText = footerTrainBtn.textContent;
+        footerTrainBtn.textContent = 'Training '+gameSampleCount+' positions...';
+        footerTrainBtn.style.opacity = '0.7';
         const meta = document.querySelector('#model-info-panel .model-meta');
-        if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Training game...</span>';
+        if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Training '+gameSampleCount+' positions...</span>';
+        const t0 = performance.now();
         await trainModelOnSamples();
+        const t1 = performance.now();
+        // Force weight panel refresh (in case auto-update skipped)
+        try { updateModelWeightsFromTF(); } catch(_){}
+        const secs = ((t1 - t0)/1000).toFixed(2);
+        footerTrainBtn.textContent = 'Trained ('+gameSampleCount+') ✓';
+        footerTrainBtn.style.opacity = '1';
+        console.log('[tf-engine] manual training complete in', secs,'s totalSamples buffer=', tfTrainingSamples.length);
+        // Leave disabled; user must finish another game for new samples
     });
 }
 const footerResetBtn = document.getElementById('btn-reset-model-footer');
