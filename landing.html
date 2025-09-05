@@ -67,7 +67,7 @@
     <div id="landing-weights-meta" class="model-meta" style="font-size:12px;opacity:.85;margin-bottom:8px;">Loading model...</div>
     <div class="model-weights-wrapper" style="max-height:260px;overflow:auto;">
       <table class="model-weights" style="width:100%;border-collapse:collapse;font-size:13px;">
-        <thead><tr><th style="text-align:left;padding:4px 6px;">Feature</th><th style="text-align:right;padding:4px 6px;">W</th></tr></thead>
+        <thead><tr><th style="text-align:left;padding:4px 6px;">Feature</th><th style="text-align:right;padding:4px 6px;">W</th><th style="text-align:right;padding:4px 6px;">Δ</th></tr></thead>
         <tbody id="landing-weight-body"></tbody>
       </table>
     </div>
@@ -109,7 +109,7 @@
       const features = ['Material','Mobility','KingSafety','CenterControl','PawnStructure','PieceActivity','Pawn','Knight','Bishop','Rook','Queen','King'];
       const tbody = document.getElementById('landing-weight-body');
       if (tbody){
-        tbody.innerHTML = features.map(f=>`<tr><td data-f="${f}" style="padding:3px 6px;">${f}</td><td data-w="${f}" style="padding:3px 6px;text-align:right;font-variant-numeric:tabular-nums;">...</td></tr>`).join('');
+        tbody.innerHTML = features.map(f=>`<tr><td data-f="${f}" style="padding:3px 6px;">${f}</td><td data-w="${f}" style="padding:3px 6px;text-align:right;font-variant-numeric:tabular-nums;">...</td><td data-d="${f}" style="padding:3px 6px;text-align:right;">—</td></tr>`).join('');
       }
       const meta = document.getElementById('landing-weights-meta');
       let model=null; let modelReady=false; let loading=false;
@@ -161,8 +161,23 @@
           Queen: combine([4,10]),
           King: combine([5,11])
         };
-        features.forEach(f=>{ const td = tbody && tbody.querySelector(`td[data-w='${f}']`); if (td && featureValues[f]!=null) td.textContent = featureValues[f].toFixed(3); });
+        // Load previous snapshot for Δ
+        let prev = null; try { const raw = localStorage.getItem('tfFeatureSnapshot'); if (raw) prev = JSON.parse(raw); } catch(_){}
+        features.forEach(f=>{
+          const wtd = tbody && tbody.querySelector(`td[data-w='${f}']`);
+          const dtd = tbody && tbody.querySelector(`td[data-d='${f}']`);
+          if (wtd && featureValues[f]!=null) wtd.textContent = featureValues[f].toFixed(4);
+          if (dtd){
+            if (prev && typeof prev[f] === 'number'){
+              const d = featureValues[f] - prev[f];
+              const s = (d>=0?'+':'') + d.toFixed(4);
+              dtd.textContent = s; dtd.style.color = d>0 ? '#2d6a2d' : (d<0 ? '#8c1f1f' : '');
+            } else { dtd.textContent = '—'; dtd.style.color=''; }
+          }
+        });
         if (meta) meta.innerHTML = 'Engine: TFValueNet <span style="opacity:.65;">(saved)</span><br><span class="note">Layer0 avg rows:'+inputDim+' units:'+units+'</span>';
+        // Save snapshot so next visit can show Δ
+        try { localStorage.setItem('tfFeatureSnapshot', JSON.stringify(featureValues)); } catch(_){}
       }
       async function init(){
         if (meta) meta.textContent='Loading model...';

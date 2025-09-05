@@ -1693,14 +1693,28 @@ function updateModelWeightsFromTF(){
         King: combine([5,11])
     };
     const rows = [...tbody.querySelectorAll('tr')];
+    if (!window.__tfPrevFeatureSnapshot) window.__tfPrevFeatureSnapshot = {};
     rows.forEach(tr=>{
         const f = tr.querySelector('td[data-feature]');
         const wcell = tr.querySelector('td[data-weightCell]');
+        // ensure delta cell exists (3rd column)
+        let dcell = tr.querySelector('td[data-deltaCell]');
+        if (!dcell){ dcell = document.createElement('td'); dcell.setAttribute('data-deltaCell','1'); tr.appendChild(dcell); }
         if (f && wcell && featureValues[f.dataset.feature] !== undefined){
-            const valStr = featureValues[f.dataset.feature].toFixed(3);
+            const prev = window.__tfPrevFeatureSnapshot[f.dataset.feature];
+            const cur = featureValues[f.dataset.feature];
+            const valStr = cur.toFixed(4);
             const before = wcell.textContent;
             wcell.textContent = valStr;
             console.log('[tf-engine] set weight', f.dataset.feature, 'before=', before, 'after=', wcell.textContent);
+            if (!isNaN(prev)){
+                const d = cur - prev; const s = (d>=0?'+':'') + d.toFixed(4);
+                dcell.textContent = s;
+                dcell.style.textAlign = 'right';
+                dcell.style.color = d>0 ? '#2d6a2d' : (d<0 ? '#8c1f1f' : '');
+            } else {
+                dcell.textContent = '—'; dcell.style.textAlign='right';
+            }
         }
     });
     // Retry pass next frame in case something overwrote (defensive)
@@ -1735,7 +1749,9 @@ function updateModelWeightsFromTF(){
     });
     console.log('[tf-engine] weights updated');
     // Cache values globally for observer reapplication
+    window.__tfPrevFeatureSnapshot = window.__tfFeatureSnapshot || featureValues;
     window.__tfFeatureSnapshot = featureValues;
+    try { localStorage.setItem('tfFeatureSnapshot', JSON.stringify(featureValues)); } catch(_){}
     // Update meta text
     const meta = document.querySelector('#model-info-panel .model-meta');
     if (meta) meta.innerHTML = `Engine: TFValueNet<br><span class="note">Layer0 avg | rows:${inputDim} units:${units}</span>`;
