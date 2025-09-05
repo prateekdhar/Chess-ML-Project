@@ -143,7 +143,7 @@ aiEnabled = true;
 const aiColor = (playerColorChoice === 'White') ? 'Black' : 'White';
 // Engine mode additions
 let engineMode = 'tf';
-let tfValueModel = null; let tfModelReady = false; let tfTrainingSamples = []; let tfGamesTrained = 0;
+let tfValueModel = null; let tfModelReady = false; let tfTrainingSamples = []; let tfGamesTrained = 0; let tfTrainingInProgress = false;
 async function ensureTFModel(){
     if (tfModelReady) return tfValueModel;
     if (typeof tf === 'undefined') { console.warn('[tf-engine] tf.js not loaded, falling back to random'); engineMode='random'; return null; }
@@ -164,6 +164,49 @@ async function ensureTFModel(){
     try { await model.save('indexeddb://tf-chess-eval'); localStorage.setItem('tfEngineModelSaved','1'); } catch(_) {}
     updateModelWeightsFromTF();
     return model;
+}
+
+function reinitializeTFModel(){
+    if (typeof tf === 'undefined') return;
+    const model = tf.sequential();
+    model.add(tf.layers.dense({inputShape:[773], units:96, activation:'relu'}));
+    model.add(tf.layers.dense({units:48, activation:'relu'}));
+    model.add(tf.layers.dense({units:1, activation:'tanh'}));
+    model.compile({optimizer:'adam', loss:'meanSquaredError'});
+    tfValueModel = model; tfModelReady = true;
+    try { model.save('indexeddb://tf-chess-eval'); localStorage.setItem('tfEngineModelSaved','1'); } catch(_) {}
+    updateModelWeightsFromTF();
+    const meta = document.querySelector('#model-info-panel .model-meta');
+    if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Model reset</span>';
+    setTimeout(()=>{ if (meta && /Model reset/.test(meta.innerHTML)) meta.innerHTML='Engine: TFValueNet<br><span class="note">Layer0 avg</span>'; }, 1800);
+}
+
+async function trainModelOnSamples(){
+    if (tfTrainingInProgress) return;
+    if (!tfValueModel || tfTrainingSamples.length === 0) return;
+    tfTrainingInProgress = true;
+    const meta = document.querySelector('#model-info-panel .model-meta');
+    if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Training '+tfTrainingSamples.length+' pos...</span>';
+    try {
+        // Build tensors
+        const xs = tf.tensor2d(tfTrainingSamples.map(s=>Array.from(s.input)));
+        const ys = tf.tensor2d(tfTrainingSamples.map(s=>[s.target]));
+        await tfValueModel.fit(xs, ys, {epochs:3, batchSize: Math.min(32, tfTrainingSamples.length), verbose:0});
+        xs.dispose(); ys.dispose();
+        tfGamesTrained++;
+        // Persist updated weights
+        try { await tfValueModel.save('indexeddb://tf-chess-eval'); } catch(_) {}
+        updateModelWeightsFromTF();
+        if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Trained on '+tfGamesTrained+' game'+(tfGamesTrained===1?'':'s')+'</span>';
+    } catch(e){
+        console.warn('[tf-engine] training failed', e);
+        if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note" style="color:#c82828;">Train failed</span>';
+    } finally {
+        tfTrainingInProgress = false;
+        // Keep recent samples but cap size (simple replay buffer)
+        if (tfTrainingSamples.length > 800) tfTrainingSamples = tfTrainingSamples.slice(-800);
+        setTimeout(()=>{ const m=document.querySelector('#model-info-panel .model-meta'); if (m && /Trained on|Train failed/.test(m.innerHTML)) { m.innerHTML='Engine: TFValueNet<br><span class="note">Layer0 avg</span>'; } }, 2200);
+    }
 }
 
 function encodeBoardForTF(){
@@ -297,6 +340,7 @@ function endGameOnTime(winnerColor) {
     if (resultBanner) resultBanner.textContent = winnerColor + ' wins on time';
     if (newGameBtn) newGameBtn.style.display = 'block';
     console.log('[clock] time over for', loser);
+    collectTrainingFromCompletedGame(winnerColor);
 }
 
 function isLegalMove(piece, fromRow, fromCol, toRow, toCol) {
@@ -666,6 +710,7 @@ function evaluateCheckState(updateLast = false) {
             }
             if (newGameBtn) newGameBtn.style.display = 'block';
             gameOver = true;
+            collectTrainingFromCompletedGame(last.color === 'White' ? 'White' : 'Black');
         } else if (inCheck) {
             last.san += '+';
         } else if (!inCheck && !hasMove) {
@@ -676,6 +721,7 @@ function evaluateCheckState(updateLast = false) {
             }
             if (newGameBtn) newGameBtn.style.display = 'block';
             gameOver = true;
+            collectTrainingFromCompletedGame(null); // draw
         }
         renderHistory();
     }
@@ -1240,6 +1286,55 @@ function recordMove(pieceName, fromRow, fromCol, toRow, toCol, capturedPiece, is
     const fullMoveNumber = Math.ceil(ply / 2);
     moveHistory.push({ ply, san, fullMoveNumber, color });
     renderHistory();
+    // Capture training sample (supervised by simple material diff heuristic) BEFORE move flips turn already done outside
+    if (engineMode==='tf' && tfModelReady) {
+        try {
+            const enc = encodeBoardForTF();
+            // simple heuristic target: material imbalance from White perspective scaled to [-1,1]
+            const matScore = computeMaterialImbalance(); // white minus black (pawns=1, knights/bishops=3, rooks=5, queen=9)
+            const target = Math.max(-1, Math.min(1, matScore/20));
+            tfTrainingSamples.push({ input: enc, target });
+        } catch(e){ console.warn('[tf-engine] sample capture failed', e); }
+    }
+}
+
+function computeMaterialImbalance(){
+    const values = { Pawn:1, Knight:3, Bishop:3, Rook:5, Queen:9 };
+    let white=0, black=0;
+    for (let r=0;r<8;r++) for (let c=0;c<8;c++){ const p=pieces[r][c]; if(!p) continue; const [color,type]=p.split(' '); if (!values[type]) continue; if (color==='White') white+=values[type]; else black+=values[type]; }
+    return white - black;
+}
+
+function collectTrainingFromCompletedGame(winner){
+    if (engineMode!=='tf' || !tfModelReady) return;
+    // Assign final outcome target to last N positions for reinforcement style signal
+    const outcome = winner==null ? 0 : (winner==='White'? 1 : -1);
+    // Use a slice of last ~30 plies (positions) to bias towards recent game context
+    const take = Math.min(positionHistory.length, 30);
+    for (let i=positionHistory.length - take; i < positionHistory.length; i++){
+        try {
+            // Temporarily load FEN to encode; then restore current board (simpler: generate enc from stored FEN parsing)
+            const fen = positionHistory[i];
+            const enc = encodeBoardFromFEN(fen);
+            tfTrainingSamples.push({ input: enc, target: outcome });
+        } catch(e){ console.warn('[tf-engine] final outcome sample failed', e); }
+    }
+    // Train asynchronously after a short delay (allow UI update)
+    setTimeout(()=>{ trainModelOnSamples(); }, 200);
+}
+
+function encodeBoardFromFEN(fen){
+    // Reconstruct encoded features without mutating live board
+    const arr = new Float32Array(773);
+    const parts = fen.split(' ');
+    const rows = parts[0].split('/');
+    const mapping = { p:0, n:1, b:2, r:3, q:4, k:5 };
+    for (let r=0;r<8;r++){
+        let file=0; for (const ch of rows[r]){ if (/^[1-8]$/.test(ch)){ file+=parseInt(ch,10); continue; } const isWhite = ch===ch.toUpperCase(); const type = ch.toLowerCase(); const base = mapping[type]; const colorOffset = isWhite?0:6; const idx=(colorOffset+base)*64 + (r*8+file); arr[idx]=1; file++; }
+    }
+    const active = parts[1]==='w' ? 'White' : 'Black';
+    arr[768] = active==='White'?1:0;
+    return arr;
 }
 
 function renderHistory() {
@@ -1648,6 +1743,15 @@ if (refreshBtn){
             if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note" style="color:#c82828;">Refresh failed</span>';
         }
         setTimeout(()=>{ const m=document.querySelector('#model-info-panel .model-meta'); if (m && /Updated|failed/.test(m.innerHTML)) { m.innerHTML='Engine: TFValueNet<br><span class="note">Layer0 avg</span>'; } }, 2500);
+    });
+}
+
+// Reset model button
+const resetBtn = document.getElementById('reset-model-btn');
+if (resetBtn){
+    resetBtn.addEventListener('click', ()=>{
+        if (!confirm('Reset model weights? This clears learned adjustments.')) return;
+        reinitializeTFModel();
     });
 }
 
