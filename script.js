@@ -1528,13 +1528,8 @@ try {
     if (!tbody) return;
     tbody.dataset.dynamic='1';
     const baseFeatures = ['Material','Mobility','KingSafety','CenterControl','PawnStructure','PieceActivity','Pawn','Knight','Bishop','Rook','Queen','King'];
-    tbody.innerHTML='';
-    baseFeatures.forEach(f=>{
-        const tr=document.createElement('tr');
-        const tdF=document.createElement('td'); tdF.textContent=f; tdF.dataset.feature=f;
-        const tdW=document.createElement('td'); tdW.textContent='-'; tdW.dataset.weightCell='1';
-        tr.appendChild(tdF); tr.appendChild(tdW); tbody.appendChild(tr);
-    });
+    // Start empty (avoid persistent '-') until numbers known
+    tbody.innerHTML = baseFeatures.map(f=>`<tr><td data-feature="${f}">${f}</td><td data-weightCell="1" data-feature-weight="${f}">...</td></tr>`).join('');
 })();
 
 function updateModelWeightsFromTF(){
@@ -1613,6 +1608,8 @@ function updateModelWeightsFromTF(){
         }
     });
     console.log('[tf-engine] weights updated');
+    // Cache values globally for observer reapplication
+    window.__tfFeatureSnapshot = featureValues;
     // Update meta text
     const meta = document.querySelector('#model-info-panel .model-meta');
     if (meta) meta.innerHTML = `Engine: TFValueNet<br><span class="note">Layer0 avg | rows:${inputDim} units:${units}</span>`;
@@ -1664,6 +1661,20 @@ setTimeout(()=>{
 
 // Expose manual helper for debugging
 window.forceUpdateWeights = ()=>{ ensureTFModel().then(()=> updateModelWeightsFromTF()); };
+
+// MutationObserver to re-apply weights if cells revert
+const weightTbody = document.getElementById('model-weight-body');
+if (weightTbody && typeof MutationObserver !== 'undefined') {
+    const obs = new MutationObserver(()=>{
+        if (!window.__tfFeatureSnapshot) return;
+        const vals = window.__tfFeatureSnapshot;
+        const cells = weightTbody.querySelectorAll('td[data-weightCell]');
+        let repaired = 0;
+        cells.forEach(td=>{ if (td.textContent.trim()==='-' || td.textContent.trim()==='...' ){ const f=td.previousElementSibling?.dataset.feature; if (f && vals[f]!==undefined){ td.textContent=vals[f].toFixed(3); repaired++; }} });
+        if (repaired>0) console.log('[tf-engine] mutation observer reapplied', repaired, 'weights');
+    });
+    obs.observe(weightTbody, {childList:true, subtree:true, characterData:true});
+}
 
 // ------- Material Balance (appended) -------
 function updateMaterialBalance(){
