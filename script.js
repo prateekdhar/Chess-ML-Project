@@ -1003,7 +1003,9 @@ function setupBoard() {
                         if (match) {
                             movePieceTo(activeSelection.fromRow, activeSelection.fromCol, targetRow, targetCol);
                             clearIndicators();
-                            updateMovePanel(activeSelection.piece, activeSelection.fromRow, activeSelection.fromCol, []);
+                            if (activeSelection) {
+                                updateMovePanel(activeSelection.piece, activeSelection.fromRow, activeSelection.fromCol, []);
+                            }
                             return;
                         }
                     }
