@@ -1054,6 +1054,9 @@ function setupBoard() {
     }
 }
 
+// Legacy hook (previously updated side panel during selection). Provide harmless stub to avoid errors.
+function updateMovePanel(){ /* intentionally empty; panel logic consolidated elsewhere */ }
+
 function handleCastling(fromRow, fromCol, toRow, toCol) {
     if (Math.abs(toCol - fromCol) === 2) {
         const rookCol = toCol > fromCol ? 7 : 0; // Kingside or Queenside
