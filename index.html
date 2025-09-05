@@ -32,7 +32,7 @@
     <div class="app-layout">
         <!-- Model parameters tile (left of board) -->
     <div id="model-info-panel" aria-label="Model parameters and weights" role="region" style="border:2px solid var(--panel-border);border-radius:12px;padding:14px 16px 16px;box-shadow:0 4px 12px rgba(0,0,0,0.18),0 1px 2px rgba(0,0,0,0.12);">
-            <div class="model-header">Model Weights</div>
+            <div class="model-header-row"><div class="model-header">Model Weights</div><button id="refresh-weights-btn" type="button" class="model-refresh-btn" aria-label="Refresh model weights" title="Refresh model weights">↻</button></div>
             <div class="model-meta">Engine: RandomMoveSelector<br><span class="note">All weights = 1</span></div>
             <div class="model-weights-wrapper">
                 <table class="model-weights" aria-label="Model feature weights">

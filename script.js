@@ -1599,6 +1599,24 @@ document.addEventListener('click', (e)=>{
     }
 });
 
+// Explicit refresh button handler
+const refreshBtn = document.getElementById('refresh-weights-btn');
+if (refreshBtn){
+    refreshBtn.addEventListener('click', async ()=>{
+        const meta = document.querySelector('#model-info-panel .model-meta');
+        if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Refreshing...</span>';
+        try {
+            await ensureTFModel();
+            updateModelWeightsFromTF();
+            if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Updated</span>';
+        } catch(e){
+            console.error('[tf-engine] refresh failed', e);
+            if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note" style="color:#c82828;">Refresh failed</span>';
+        }
+        setTimeout(()=>{ const m=document.querySelector('#model-info-panel .model-meta'); if (m && /Updated|failed/.test(m.innerHTML)) { m.innerHTML='Engine: TFValueNet<br><span class="note">Layer0 avg</span>'; } }, 2500);
+    });
+}
+
 // ------- Material Balance (appended) -------
 function updateMaterialBalance(){
     const diffEl = document.getElementById('material-diff');

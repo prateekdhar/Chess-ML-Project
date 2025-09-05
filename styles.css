@@ -330,6 +330,12 @@ body.dark #model-info-panel { background: var(--panel-bg); box-shadow: 0 4px 14p
 #model-info-panel table.model-weights tbody tr:hover { background: rgba(200,40,40,0.15); }
 body.dark #model-info-panel table.model-weights tbody tr:hover { background: rgba(185,178,146,0.18); }
 
+#model-info-panel .model-header-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.model-refresh-btn { border:1px solid var(--panel-border); background: var(--history-even); color: var(--text-color); cursor:pointer; padding:2px 6px; border-radius:6px; font-size:13px; font-weight:600; line-height:1; }
+.model-refresh-btn:hover { background: var(--history-odd); }
+body.dark .model-refresh-btn { background: var(--history-odd); color: var(--text-color); border-color: var(--panel-border); }
+body.dark .model-refresh-btn:hover { background: var(--history-even); }
+
 /* Material balance rows: horizontal scroll with tiny piece icons */
 #material-balance { font-family:'Roboto',sans-serif; }
 #material-balance .captured-row {
