@@ -143,7 +143,7 @@ aiEnabled = true;
 const aiColor = (playerColorChoice === 'White') ? 'Black' : 'White';
 // Engine mode additions
 let engineMode = 'tf';
-let tfValueModel = null; let tfModelReady = false; let tfTrainingSamples = []; let tfGamesTrained = 0; let tfTrainingInProgress = false;
+let tfValueModel = null; let tfModelReady = false; let tfTrainingSamples = []; let tfGamesTrained = 0; let tfTrainingInProgress = false; let tfCurrentGameSamples = [];
 async function ensureTFModel(){
     if (tfModelReady) return tfValueModel;
     if (typeof tf === 'undefined') { console.warn('[tf-engine] tf.js not loaded, falling back to random'); engineMode='random'; return null; }
@@ -1318,20 +1318,16 @@ function computeMaterialImbalance(){
 
 function collectTrainingFromCompletedGame(winner){
     if (engineMode!=='tf' || !tfModelReady) return;
-    // Assign final outcome target to last N positions for reinforcement style signal
+    // Mark outcome but do not auto-train; store per-game samples (copy) for manual trigger
     const outcome = winner==null ? 0 : (winner==='White'? 1 : -1);
-    // Use a slice of last ~30 plies (positions) to bias towards recent game context
-    const take = Math.min(positionHistory.length, 30);
+    const gamePositions = [];
+    const take = Math.min(positionHistory.length, 60); // broader slice
     for (let i=positionHistory.length - take; i < positionHistory.length; i++){
-        try {
-            // Temporarily load FEN to encode; then restore current board (simpler: generate enc from stored FEN parsing)
-            const fen = positionHistory[i];
-            const enc = encodeBoardFromFEN(fen);
-            tfTrainingSamples.push({ input: enc, target: outcome });
-        } catch(e){ console.warn('[tf-engine] final outcome sample failed', e); }
+        try { const fen = positionHistory[i]; const enc = encodeBoardFromFEN(fen); gamePositions.push({input: enc, target: outcome}); } catch(e){ console.warn('[tf-engine] final outcome sample failed', e); }
     }
-    // Train asynchronously after a short delay (allow UI update)
-    setTimeout(()=>{ trainModelOnSamples(); }, 200);
+    tfCurrentGameSamples = gamePositions;
+    const actions = document.getElementById('post-game-actions');
+    if (actions) actions.style.display = 'flex';
 }
 
 function encodeBoardFromFEN(fen){
@@ -1755,6 +1751,25 @@ if (refreshBtn){
         }
         setTimeout(()=>{ const m=document.querySelector('#model-info-panel .model-meta'); if (m && /Updated|failed/.test(m.innerHTML)) { m.innerHTML='Engine: TFValueNet<br><span class="note">Layer0 avg</span>'; } }, 2500);
     });
+}
+
+// Footer post-game buttons
+const footerTrainBtn = document.getElementById('btn-train-this-game');
+if (footerTrainBtn){
+    footerTrainBtn.addEventListener('click', async ()=>{
+        if (!tfCurrentGameSamples.length){ footerTrainBtn.disabled = true; return; }
+        // Merge samples into global buffer then train
+        tfTrainingSamples = tfTrainingSamples.concat(tfCurrentGameSamples);
+        tfCurrentGameSamples = [];
+        footerTrainBtn.disabled = true;
+        const meta = document.querySelector('#model-info-panel .model-meta');
+        if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Training game...</span>';
+        await trainModelOnSamples();
+    });
+}
+const footerResetBtn = document.getElementById('btn-reset-model-footer');
+if (footerResetBtn){
+    footerResetBtn.addEventListener('click', ()=>{ if (confirm('Reset model weights?')) { reinitializeTFModel(); } });
 }
 
 // Reset model button
