@@ -1829,10 +1829,26 @@ function updateModelWeightsFromTF(){
             wcell.textContent = valStr;
             console.log('[tf-engine] set weight', f.dataset.feature, 'before=', before, 'after=', wcell.textContent);
             if (!isNaN(prev)){
-                const d = cur - prev; const s = (d>=0?'+':'') + d.toFixed(4);
+                const d = cur - prev;
+                function formatDelta(val){
+                    if (val === 0) return '0';
+                    const sign = val>0?'+':'-';
+                    const abs = Math.abs(val);
+                    // Try increasing precision until a non-zero digit appears or cap reached
+                    for (let p=4; p<=8; p++){
+                        const fixed = abs.toFixed(p);
+                        if (parseFloat(fixed) !== 0){
+                            let trimmed = fixed.replace(/0+$/,'').replace(/\.$/,'');
+                            return sign + trimmed;
+                        }
+                    }
+                    return sign + '<1e-8';
+                }
+                const s = formatDelta(d);
                 dcell.textContent = s;
                 dcell.style.textAlign = 'right';
                 dcell.style.color = d>0 ? '#2d6a2d' : (d<0 ? '#8c1f1f' : '');
+                dcell.title = 'Δ ' + d.toPrecision(6);
             } else {
                 dcell.textContent = '—'; dcell.style.textAlign='right';
             }
