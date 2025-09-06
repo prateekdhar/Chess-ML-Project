@@ -178,6 +178,19 @@
         King: combine([5,11])
       };
       let prev=null; try { const raw=localStorage.getItem('tfFeatureSnapshot'); if(raw) prev=JSON.parse(raw); } catch(_){ }
+      function formatDelta(val){
+        if (val === 0) return '0';
+        const sign = val>0?'+':'-';
+        const abs = Math.abs(val);
+        for (let p=4; p<=8; p++){
+          const fixed = abs.toFixed(p);
+          if (parseFloat(fixed) !== 0){
+            let trimmed = fixed.replace(/0+$/,'').replace(/\.$/,'');
+            return sign + trimmed;
+          }
+        }
+        return sign + '<1e-8';
+      }
       features.forEach(f=>{
         const wtd=tbody && tbody.querySelector(`td[data-w='${f}']`);
         const dtd=tbody && tbody.querySelector(`td[data-d='${f}']`);
@@ -185,9 +198,10 @@
         if (dtd){
           if (prev && typeof prev[f]==='number'){
             const d = featureValues[f]-prev[f];
-            dtd.textContent = (d>=0?'+':'')+d.toFixed(4);
+            dtd.textContent = formatDelta(d);
             dtd.style.color = d>0 ? '#2d6a2d' : (d<0 ? '#8c1f1f' : '');
-          } else { dtd.textContent='—'; dtd.style.color=''; }
+            dtd.title = 'Δ ' + d.toPrecision(6);
+          } else { dtd.textContent='—'; dtd.style.color=''; dtd.removeAttribute('title'); }
         }
       });
       if (meta) meta.innerHTML = 'Engine: TFValueNet <span style="opacity:.65;">(saved)</span><br><span class="note">Layer0 rows:'+inputDim+' units:'+units+'</span>';
