@@ -69,6 +69,13 @@ let moveHistory = []; // stores { ply, san, fullMoveNumber, color }
 let positionHistory = []; // FEN positions (initial + after each move)
 let currentPositionIndex = 0; // pointer into positionHistory
 let promotionPending = false; // blocks AI move until user picks promotion piece
+// Threefold repetition map: key = FEN components (placement,active,castling,ep)
+const repetitionCounts = Object.create(null);
+// Opening recognition state
+let openingTrie = null; // built lazily from JSON
+let currentOpeningNode = null; // pointer while traversing moves
+let detectedOpening = null; // { name, eco, moves }
+let openingLoadPromise = null;
 // Clock / Timer state
 let baseMinutes = 0; // 0 = unlimited
 let whiteTimeMs = 0;
@@ -144,6 +151,8 @@ const aiColor = (playerColorChoice === 'White') ? 'Black' : 'White';
 // Engine mode additions
 let engineMode = 'tf';
 let tfValueModel = null; let tfModelReady = false; let tfTrainingSamples = []; let tfGamesTrained = 0; let tfTrainingInProgress = false; let tfCurrentGameSamples = [];
+// Exploration epsilon (ε-greedy) for TF move selection (decays over games)
+let tfEpsilon = 0.25;
 async function ensureTFModel(){
     if (tfModelReady) return tfValueModel;
     if (typeof tf === 'undefined') { console.warn('[tf-engine] tf.js not loaded, falling back to random'); engineMode='random'; return null; }
@@ -244,25 +253,39 @@ function firstLayerChecksum(){
     } catch(_) { return 0; }
 }
 
-function encodeBoardForTF(){
-    // 773 features same mapping as ml.js encodeBoard
+function encodeBoardForTFCore(side){
+    // 768 one-hot planes + 1 side + 4 engineered features = 773
     const mapping = { Pawn:0, Knight:1, Bishop:2, Rook:3, Queen:4, King:5 };
     const arr = new Float32Array(773);
     for (let r=0;r<8;r++){
         for (let c=0;c<8;c++){
-            const p = pieces[r][c];
-            if (!p) continue;
-            const [color, type] = p.split(' ');
+            const p = pieces[r][c]; if(!p) continue;
+            const [color,type] = p.split(' ');
             const base = mapping[type];
-            const colorOffset = color === 'White' ? 0 : 6;
-            const idx = (colorOffset + base) * 64 + (r*8+c);
-            arr[idx] = 1;
+            const colorOffset = color==='White'?0:6;
+            const idx=(colorOffset+base)*64+(r*8+c);
+            arr[idx]=1;
         }
     }
-    arr[768] = (turn === 'White') ? 1 : 0;
-    // remaining indices unused (for parity with ml.js design up to 773 length)
+    arr[768] = side==='White'?1:0;
+    function countLegal(color){ let total=0; for(let r=0;r<8;r++) for(let c=0;c<8;c++){ const q=pieces[r][c]; if(!q||!q.includes(color)) continue; total += getLegalMoves(q,r,c).length; } return total; }
+    function kingPos(color){ for(let r=0;r<8;r++) for(let c=0;c<8;c++){ if(pieces[r][c]===color+' King') return [r,c]; } return [-1,-1]; }
+    function kingZoneDanger(color){ const opp=color==='White'?'Black':'White'; const [kr,kc]=kingPos(color); if(kr<0) return 0; let atk=0; for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){ if(!dr&&!dc) continue; const nr=kr+dr,nc=kc+dc; if(nr<0||nr>7||nc<0||nc>7) continue; if(isSquareAttacked(pieces,nr,nc,opp)) atk++; } return atk/8; }
+    function kingShelter(color){ const dir=color==='White'?-1:1; const [kr,kc]=kingPos(color); if(kr<0) return 0; let shield=0; for(let dc=-1;dc<=1;dc++){ const file=kc+dc; const rank=kr+dir; if(rank<0||rank>7||file<0||file>7) continue; const p=pieces[rank][file]; if(p===color+' Pawn') shield++; } return shield/3; }
+    function passedPawns(color){ const forward=color==='White'?-1:1; let cnt=0; for(let r=0;r<8;r++) for(let c=0;c<8;c++){ const p=pieces[r][c]; if(p!==color+' Pawn') continue; let blocked=false; for(let rr=r+forward; rr>=0&&rr<8; rr+=forward){ for(let dc=-1;dc<=1;dc++){ const cc=c+dc; if(cc<0||cc>7) continue; const q=pieces[rr][cc]; if(q && q===(color==='White'?'Black':'White')+' Pawn'){ blocked=true; break; } } if(blocked) break; } if(!blocked) cnt++; } return cnt; }
+    const whiteMob=countLegal('White'); const blackMob=countLegal('Black');
+    const mobilityDiff=(whiteMob-blackMob)/100;
+    const sideKingDanger=kingZoneDanger(side);
+    const sideKingShelter=kingShelter(side);
+    const passedDiff=(passedPawns('White')-passedPawns('Black'))/8;
+    arr[769]=sideKingDanger; // danger
+    arr[770]=sideKingShelter; // shelter
+    arr[771]=passedDiff; // passed pawns diff
+    arr[772]=mobilityDiff; // mobility diff
     return arr;
 }
+function encodeBoardForTF(){ return encodeBoardForTFCore(turn); }
+function encodeBoardForTFWithSide(side){ return encodeBoardForTFCore(side); }
 
 async function evaluatePositionTF(){
     if (engineMode !== 'tf') return 0;
@@ -279,25 +302,21 @@ async function evaluatePositionTF(){
 async function selectMoveTF(allMoves){
     const model = await ensureTFModel();
     if (!model) return allMoves[Math.floor(Math.random()*allMoves.length)];
-    let best = null; let bestScore = -Infinity;
+    for (let i=allMoves.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [allMoves[i],allMoves[j]]=[allMoves[j],allMoves[i]]; }
+    const plies = moveHistory.length;
+    let effEps = tfEpsilon;
+    if (plies < 8) effEps = Math.max(effEps, 0.4); else if (plies < 20) effEps = Math.max(effEps, 0.25); else effEps = Math.max(effEps*0.5, 0.05);
+    if (Math.random() < effEps) return allMoves[Math.floor(Math.random()*allMoves.length)];
+    let best=null,bestScore=-Infinity; const tieTol=1e-6;
     for (const mv of allMoves){
-        // simulate move
-        const pieceName = pieces[mv.fromR][mv.fromC];
-        const captured = pieces[mv.toR][mv.toC];
-        pieces[mv.toR][mv.toC] = pieceName;
-        pieces[mv.fromR][mv.fromC] = null;
-        const prevTurn = turn; turn = (turn==='White')?'Black':'White';
-        const enc = encodeBoardForTF();
-        const pred = tfValueModel.predict(tf.tensor2d([Array.from(enc)]));
-        const score = (await pred.data())[0];
-        pred.dispose();
-        // undo
-        turn = prevTurn;
-        pieces[mv.fromR][mv.fromC] = pieceName;
-        pieces[mv.toR][mv.toC] = captured;
-        if (score > bestScore){ bestScore = score; best = mv; }
+        const pieceName=pieces[mv.fromR][mv.fromC]; const captured=pieces[mv.toR][mv.toC];
+        pieces[mv.toR][mv.toC]=pieceName; pieces[mv.fromR][mv.fromC]=null; const prevTurn=turn; turn=(turn==='White')?'Black':'White';
+        const enc=encodeBoardForTF(); const pred=tfValueModel.predict(tf.tensor2d([Array.from(enc)])); const score=(await pred.data())[0]; pred.dispose();
+        turn=prevTurn; pieces[mv.fromR][mv.fromC]=pieceName; pieces[mv.toR][mv.toC]=captured;
+        if(score>bestScore+tieTol){ bestScore=score; best=mv; }
+        else if(Math.abs(score-bestScore)<=tieTol && Math.random()<0.5){ bestScore=score; best=mv; }
     }
-    return best || allMoves[0];
+    return best||allMoves[0];
 }
 // Track when an AI move is executing (for auto-promotion logic)
 let aiMoveExecuting = false;
@@ -1321,14 +1340,23 @@ function recordMove(pieceName, fromRow, fromCol, toRow, toCol, capturedPiece, is
     const fullMoveNumber = Math.ceil(ply / 2);
     moveHistory.push({ ply, san, fullMoveNumber, color });
     renderHistory();
-    // Capture training sample (supervised by simple material diff heuristic) BEFORE move flips turn already done outside
+    // Update opening detection with SAN (without +/# annotations for path)
+    try { updateOpeningRecognition(san); } catch(e){ console.warn('[opening] update failed', e); }
+    // Capture training sample with perspective-correct heuristic (value for side to move after this move)
     if (engineMode==='tf' && tfModelReady) {
         try {
-            const enc = encodeBoardForTF();
-            // simple heuristic target: material imbalance from White perspective scaled to [-1,1]
-            const matScore = computeMaterialImbalance(); // white minus black (pawns=1, knights/bishops=3, rooks=5, queen=9)
-            const target = Math.max(-1, Math.min(1, matScore/20));
-            tfTrainingSamples.push({ input: enc, target });
+            const sideToMoveAfter = (turn === 'White') ? 'Black' : 'White';
+            const enc = encodeBoardForTFWithSide(sideToMoveAfter);
+            const matScore = computeMaterialImbalance(); // white minus black
+            function countLegal(color){ let total=0; for(let r=0;r<8;r++) for(let c=0;c<8;c++){ const p=pieces[r][c]; if(!p||!p.includes(color)) continue; total += getLegalMoves(p,r,c).length; } return total; }
+            const whiteMob = countLegal('White'); const blackMob = countLegal('Black');
+            const mobilityDiff = whiteMob - blackMob;
+            const whiteInCheck = isKingInCheck('White') ? 1 : 0; const blackInCheck = isKingInCheck('Black') ? 1 : 0;
+            const kingSafety = (blackInCheck - whiteInCheck);
+            let raw = (matScore/20) + 0.02*(mobilityDiff/30) + 0.05*kingSafety;
+            if (raw>1) raw=1; else if (raw<-1) raw=-1;
+            const perspectiveVal = sideToMoveAfter==='White'? raw : -raw;
+            tfTrainingSamples.push({ input: enc, target: perspectiveVal });
         } catch(e){ console.warn('[tf-engine] sample capture failed', e); }
     }
 }
@@ -1342,16 +1370,24 @@ function computeMaterialImbalance(){
 
 function collectTrainingFromCompletedGame(winner){
     if (engineMode!=='tf' || !tfModelReady) return;
-    // Mark outcome but do not auto-train; store per-game samples (copy) for manual trigger
-    const outcome = winner==null ? 0 : (winner==='White'? 1 : -1);
+    const outcomeWhite = winner==null ? 0 : (winner==='White'?1:-1); // white perspective
     const gamePositions = [];
-    const take = Math.min(positionHistory.length, 60); // broader slice
-    for (let i=positionHistory.length - take; i < positionHistory.length; i++){
-        try { const fen = positionHistory[i]; const enc = encodeBoardFromFEN(fen); gamePositions.push({input: enc, target: outcome}); } catch(e){ console.warn('[tf-engine] final outcome sample failed', e); }
+    for (let i=0;i<positionHistory.length;i++){
+        try {
+            const fen = positionHistory[i];
+            const enc = encodeBoardFromFEN(fen); // active side encoded in feature 768
+            const activeIsWhite = enc[768] === 1;
+            const target = activeIsWhite ? outcomeWhite : -outcomeWhite;
+            gamePositions.push({ input: enc, target });
+        } catch(e){ console.warn('[tf-engine] final outcome sample failed', e); }
     }
     tfCurrentGameSamples = gamePositions;
     const actions = document.getElementById('post-game-actions');
     if (actions) actions.style.display = 'flex';
+    // Decay epsilon (floor at 0.05)
+    if (typeof tfEpsilon === 'number') {
+        tfEpsilon = Math.max(0.05, tfEpsilon * 0.97);
+    }
 }
 
 function encodeBoardFromFEN(fen){
@@ -1425,6 +1461,73 @@ function renderHistory() {
     }
 }
 
+// ---------------- Opening Recognition -----------------
+// Expected JSON schema example (openings.json): [{"eco":"B01","name":"Scandinavian Defense","moves":"e4 d5"}, ...]
+async function ensureOpeningTrie(){
+    if (openingTrie) return openingTrie;
+    if (!openingLoadPromise){
+        openingLoadPromise = (async ()=>{
+            try {
+                const resp = await fetch('openings.json');
+                if (!resp.ok) throw new Error('HTTP '+resp.status);
+                const list = await resp.json();
+                openingTrie = buildOpeningTrie(list);
+                return openingTrie;
+            } catch(e){ console.warn('[opening] load failed', e); openingTrie = {children:{}}; return openingTrie; }
+        })();
+    }
+    return openingLoadPromise;
+}
+
+function buildOpeningTrie(entries){
+    const root = { children: Object.create(null), terminal:null };
+    for (const entry of entries){
+        if (!entry || !entry.moves) continue;
+        const sanSeq = entry.moves.trim().split(/\s+/); // space separated algebraic moves
+        let node = root;
+        for (const san of sanSeq){
+            const key = normalizeSANForOpening(san);
+            if (!node.children[key]) node.children[key] = { children:Object.create(null), terminal:null };
+            node = node.children[key];
+        }
+        // store best (prefer longer name or keep first?) – keep first if already set
+        if (!node.terminal) node.terminal = { eco: entry.eco || '', name: entry.name || entry.moves, moves: sanSeq };
+    }
+    return root;
+}
+
+function normalizeSANForOpening(san){
+    return san.replace(/[+#]/g,''); // strip check/mate symbols; keep captures and promotion markers
+}
+
+async function updateOpeningRecognition(latestSAN){
+    await ensureOpeningTrie();
+    if (!openingTrie) return;
+    if (!currentOpeningNode) currentOpeningNode = openingTrie;
+    // Re-walk from root if a branch ended (handles takebacks / navigation not yet implemented)
+    // Build sequence from moveHistory for robustness
+    let node = openingTrie; let best = null;
+    for (const mv of moveHistory){
+        const key = normalizeSANForOpening(mv.san);
+        if (!node.children[key]) { node = null; break; }
+        node = node.children[key];
+        if (node.terminal) best = node.terminal;
+        // limit depth to avoid huge traversals (openings rarely beyond 30 plies)
+        if (mv.ply > 60) break;
+    }
+    detectedOpening = best;
+    const nameEl = document.getElementById('opening-name');
+    const ecoEl = document.getElementById('opening-eco');
+    if (nameEl){
+        if (best){
+            nameEl.textContent = best.name;
+            if (ecoEl) ecoEl.textContent = best.eco ? best.eco + ' • ' + best.moves.join(' ') : best.moves.join(' ');
+        } else {
+            nameEl.textContent = '—'; if (ecoEl) ecoEl.textContent='';
+        }
+    }
+}
+
 setupBoard();
 
 // Re-apply orientation after initial render (in case classes added before board DOM ready)
@@ -1468,8 +1571,26 @@ function saveCurrentPositionFEN() {
     const fen = generateFEN();
     if (positionHistory[positionHistory.length -1] !== fen) {
         positionHistory.push(fen);
+        // Update repetition count (ignore halfmove/fullmove counters)
+        try {
+            const repKey = fen.split(' ').slice(0,4).join(' ');
+            repetitionCounts[repKey] = (repetitionCounts[repKey]||0)+1;
+        } catch(_) {}
     }
 }
+    // Threefold repetition detection (after adding new position)
+    if (!gameOver) {
+        try {
+            const latestFen = positionHistory[positionHistory.length-1];
+            const repKey = latestFen.split(' ').slice(0,4).join(' ');
+            if (repetitionCounts[repKey] >= 3) {
+                gameOver = true;
+                if (resultBanner) { resultBanner.textContent = 'Draw by threefold repetition'; resultBanner.classList.add('visible'); }
+                if (newGameBtn) newGameBtn.style.display = 'block';
+                collectTrainingFromCompletedGame(null);
+            }
+        } catch(_) {}
+    }
 
 function fenCharToPiece(ch) {
     const isWhite = ch === ch.toUpperCase();
