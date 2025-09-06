@@ -24,17 +24,19 @@
     </script>
     <!-- Tailwind CDN for utility classes (odd/even row styling) -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- TensorFlow.js for experimental model-based engine (feature branch) -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.18.0/dist/tf.min.js"></script>
     <link rel="stylesheet" href="styles.css?v=20250905a">
 </head>
 <body>
     <div class="app-layout">
         <!-- Model parameters tile (left of board) -->
     <div id="model-info-panel" aria-label="Model parameters and weights" role="region" style="border:2px solid var(--panel-border);border-radius:12px;padding:14px 16px 16px;box-shadow:0 4px 12px rgba(0,0,0,0.18),0 1px 2px rgba(0,0,0,0.12);">
-            <div class="model-header">Model Weights</div>
+            <div class="model-header-row"><div class="model-header">Model Weights</div><div style="display:flex;gap:6px;align-items:center;"><button id="refresh-weights-btn" type="button" class="model-refresh-btn" aria-label="Refresh model weights" title="Refresh model weights">↻</button><button id="reset-model-btn" type="button" class="model-refresh-btn" aria-label="Reset model (reinitialize weights)" title="Reset model (reinitialize weights)">⟲</button></div></div>
             <div class="model-meta">Engine: RandomMoveSelector<br><span class="note">All weights = 1</span></div>
             <div class="model-weights-wrapper">
                 <table class="model-weights" aria-label="Model feature weights">
-                    <thead><tr><th>Feature</th><th>W</th></tr></thead>
+                    <thead><tr><th>Feature</th><th>W</th><th>Δ</th></tr></thead>
                     <tbody id="model-weight-body">
                         <tr><td>Material</td><td>1</td></tr>
                         <tr><td>Mobility</td><td>1</td></tr>
@@ -107,6 +109,9 @@
                     <tbody id="history-body" class="text-sm"></tbody>
                 </table>
             </div>
+            <div id="opening-display" style="margin-top:8px;padding:6px 8px;border:1px solid var(--panel-border);border-radius:6px;font-size:12px;min-height:38px;line-height:1.3;background:var(--history-even);">
+                <strong style="font-size:12px;">Opening:</strong> <span id="opening-name" style="font-weight:600;">—</span><br><span id="opening-eco" style="opacity:.75;">&nbsp;</span>
+            </div>
             <div class="nav-controls" style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;">
                 <button id="nav-first" type="button" class="nav-btn" title="First position" aria-label="First Position">⏮️</button>
                 <button id="nav-prev" type="button" class="nav-btn" title="Previous position" aria-label="Previous Position">◀️</button>
@@ -116,10 +121,13 @@
             <div id="result-banner" class="result-banner" role="status" aria-live="polite"></div>
             <div style="margin-top:8px;text-align:center;">
                 <button id="new-game-btn" type="button" style="display:none; width:100%;">New Game</button>
+                <div id="post-game-actions" style="display:none;margin-top:8px;flex-direction:column;gap:6px;">
+                    <button id="btn-train-this-game" type="button" style="width:100%;">Train model on this game</button>
+                    <button id="btn-reset-model-footer" type="button" style="width:100%;">Reset Model</button>
+                </div>
             </div>
         </aside>
     </div>
-    <script src="script.js?v=20250903d"></script>
-    <script src="ml.js?v=20250903"></script>
+    <script src="script.js?v=20250905-tf"></script>
 </body>
 </html>

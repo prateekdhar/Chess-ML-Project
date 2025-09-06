@@ -69,6 +69,13 @@ let moveHistory = []; // stores { ply, san, fullMoveNumber, color }
 let positionHistory = []; // FEN positions (initial + after each move)
 let currentPositionIndex = 0; // pointer into positionHistory
 let promotionPending = false; // blocks AI move until user picks promotion piece
+// Threefold repetition map: key = FEN components (placement,active,castling,ep)
+const repetitionCounts = Object.create(null);
+// Opening recognition state
+let openingTrie = null; // built lazily from JSON
+let currentOpeningNode = null; // pointer while traversing moves
+let detectedOpening = null; // { name, eco, moves }
+let openingLoadPromise = null;
 // Clock / Timer state
 let baseMinutes = 0; // 0 = unlimited
 let whiteTimeMs = 0;
@@ -141,6 +148,176 @@ try { playerColorChoice = localStorage.getItem('playerColor') || 'White'; } catc
 // Player choice determines orientation only; random AI plays the opposite color
 aiEnabled = true;
 const aiColor = (playerColorChoice === 'White') ? 'Black' : 'White';
+// Engine mode additions
+let engineMode = 'tf';
+let tfValueModel = null; let tfModelReady = false; let tfTrainingSamples = []; let tfGamesTrained = 0; let tfTrainingInProgress = false; let tfCurrentGameSamples = [];
+// Exploration epsilon (ε-greedy) for TF move selection (decays over games)
+let tfEpsilon = 0.25;
+async function ensureTFModel(){
+    if (tfModelReady) return tfValueModel;
+    if (typeof tf === 'undefined') { console.warn('[tf-engine] tf.js not loaded, falling back to random'); engineMode='random'; return null; }
+    // Simple tiny model (not trained) for demo; input = 64*12 + sideToMove (same as ml.js concept but simpler mapping)
+    const existing = window.localStorage.getItem('tfEngineModelSaved');
+    if (existing) {
+        try {
+            tfValueModel = await tf.loadLayersModel('indexeddb://tf-chess-eval');
+            // Some older saved models may lack training config; recompile if optimizer missing
+            if (!tfValueModel.optimizer) {
+                tfValueModel.compile({optimizer:'adam', loss:'meanSquaredError'});
+                console.log('[tf-engine] loaded model had no optimizer; recompiled');
+            }
+            tfModelReady = true; return tfValueModel;
+        } catch(e){ console.warn('[tf-engine] load failed', e); }
+    }
+    const model = tf.sequential();
+    model.add(tf.layers.dense({inputShape:[773], units:96, activation:'relu'}));
+    model.add(tf.layers.dense({units:48, activation:'relu'}));
+    model.add(tf.layers.dense({units:1, activation:'tanh'}));
+    model.compile({optimizer:'adam', loss:'meanSquaredError'});
+    tfValueModel = model; tfModelReady = true;
+    try { await model.save('indexeddb://tf-chess-eval'); localStorage.setItem('tfEngineModelSaved','1'); } catch(_) {}
+    updateModelWeightsFromTF();
+    return model;
+}
+
+function reinitializeTFModel(){
+    if (typeof tf === 'undefined') return;
+    const model = tf.sequential();
+    model.add(tf.layers.dense({inputShape:[773], units:96, activation:'relu'}));
+    model.add(tf.layers.dense({units:48, activation:'relu'}));
+    model.add(tf.layers.dense({units:1, activation:'tanh'}));
+    model.compile({optimizer:'adam', loss:'meanSquaredError'});
+    tfValueModel = model; tfModelReady = true;
+    try { model.save('indexeddb://tf-chess-eval'); localStorage.setItem('tfEngineModelSaved','1'); } catch(_) {}
+    updateModelWeightsFromTF();
+    const meta = document.querySelector('#model-info-panel .model-meta');
+    if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Model reset</span>';
+    setTimeout(()=>{ if (meta && /Model reset/.test(meta.innerHTML)) meta.innerHTML='Engine: TFValueNet<br><span class="note">Layer0 avg</span>'; }, 1800);
+}
+
+async function trainModelOnSamples(){
+    if (tfTrainingInProgress) return;
+    if (!tfValueModel || tfTrainingSamples.length === 0) return;
+    tfTrainingInProgress = true;
+    const meta = document.querySelector('#model-info-panel .model-meta');
+    if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Training '+tfTrainingSamples.length+' pos...</span>';
+    try {
+        // Ensure model still compiled (defensive)
+        await ensureTFModel();
+        if (tfValueModel && !tfValueModel.optimizer) {
+            tfValueModel.compile({optimizer:'adam', loss:'meanSquaredError'});
+            console.log('[tf-engine] compile safeguard applied before training');
+        }
+        const checksumBefore = firstLayerChecksum();
+        // Build tensors
+        const xs = tf.tensor2d(tfTrainingSamples.map(s=>Array.from(s.input)));
+        const ys = tf.tensor2d(tfTrainingSamples.map(s=>[s.target]));
+        console.log('[tf-engine] training start: samples=', tfTrainingSamples.length, 'batchSize=', Math.min(32, tfTrainingSamples.length));
+        await tfValueModel.fit(xs, ys, {
+            epochs: 3,
+            batchSize: Math.min(32, tfTrainingSamples.length),
+            verbose: 0,
+            callbacks: {
+                onEpochEnd: (epoch, logs)=>{
+                    console.log('[tf-engine] epoch', epoch+1, 'loss=', Number(logs?.loss).toFixed(5));
+                }
+            }
+        });
+        xs.dispose(); ys.dispose();
+        tfGamesTrained++;
+        // Persist updated weights
+        try { await tfValueModel.save('indexeddb://tf-chess-eval'); } catch(_) {}
+        updateModelWeightsFromTF();
+        const checksumAfter = firstLayerChecksum();
+        const delta = (checksumAfter - checksumBefore);
+        console.log('[tf-engine] training complete. checksum L1 before=', checksumBefore.toFixed(6), 'after=', checksumAfter.toFixed(6), 'delta=', delta.toFixed(6));
+        if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Trained on '+tfGamesTrained+' game'+(tfGamesTrained===1?'':'s')+'</span>';
+    } catch(e){
+        console.warn('[tf-engine] training failed', e);
+        if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note" style="color:#c82828;">Train failed</span>';
+    } finally {
+        tfTrainingInProgress = false;
+        // Keep recent samples but cap size (simple replay buffer)
+        if (tfTrainingSamples.length > 800) tfTrainingSamples = tfTrainingSamples.slice(-800);
+        setTimeout(()=>{ const m=document.querySelector('#model-info-panel .model-meta'); if (m && /Trained on|Train failed/.test(m.innerHTML)) { m.innerHTML='Engine: TFValueNet<br><span class="note">Layer0 avg</span>'; } }, 2200);
+    }
+}
+
+function firstLayerChecksum(){
+    try {
+        if (!tfValueModel || !tfValueModel.layers || !tfValueModel.layers[0]) return 0;
+        const w = tfValueModel.layers[0].getWeights?.()[0];
+        if (!w) return 0;
+        const d = w.dataSync(); let s=0; for (let i=0;i<d.length;i++){ s += Math.abs(d[i]); }
+        return s;
+    } catch(_) { return 0; }
+}
+
+function encodeBoardForTFCore(side){
+    // 768 one-hot planes + 1 side + 4 engineered features = 773
+    const mapping = { Pawn:0, Knight:1, Bishop:2, Rook:3, Queen:4, King:5 };
+    const arr = new Float32Array(773);
+    for (let r=0;r<8;r++){
+        for (let c=0;c<8;c++){
+            const p = pieces[r][c]; if(!p) continue;
+            const [color,type] = p.split(' ');
+            const base = mapping[type];
+            const colorOffset = color==='White'?0:6;
+            const idx=(colorOffset+base)*64+(r*8+c);
+            arr[idx]=1;
+        }
+    }
+    arr[768] = side==='White'?1:0;
+    function countLegal(color){ let total=0; for(let r=0;r<8;r++) for(let c=0;c<8;c++){ const q=pieces[r][c]; if(!q||!q.includes(color)) continue; total += getLegalMoves(q,r,c).length; } return total; }
+    function kingPos(color){ for(let r=0;r<8;r++) for(let c=0;c<8;c++){ if(pieces[r][c]===color+' King') return [r,c]; } return [-1,-1]; }
+    function kingZoneDanger(color){ const opp=color==='White'?'Black':'White'; const [kr,kc]=kingPos(color); if(kr<0) return 0; let atk=0; for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){ if(!dr&&!dc) continue; const nr=kr+dr,nc=kc+dc; if(nr<0||nr>7||nc<0||nc>7) continue; if(isSquareAttacked(pieces,nr,nc,opp)) atk++; } return atk/8; }
+    function kingShelter(color){ const dir=color==='White'?-1:1; const [kr,kc]=kingPos(color); if(kr<0) return 0; let shield=0; for(let dc=-1;dc<=1;dc++){ const file=kc+dc; const rank=kr+dir; if(rank<0||rank>7||file<0||file>7) continue; const p=pieces[rank][file]; if(p===color+' Pawn') shield++; } return shield/3; }
+    function passedPawns(color){ const forward=color==='White'?-1:1; let cnt=0; for(let r=0;r<8;r++) for(let c=0;c<8;c++){ const p=pieces[r][c]; if(p!==color+' Pawn') continue; let blocked=false; for(let rr=r+forward; rr>=0&&rr<8; rr+=forward){ for(let dc=-1;dc<=1;dc++){ const cc=c+dc; if(cc<0||cc>7) continue; const q=pieces[rr][cc]; if(q && q===(color==='White'?'Black':'White')+' Pawn'){ blocked=true; break; } } if(blocked) break; } if(!blocked) cnt++; } return cnt; }
+    const whiteMob=countLegal('White'); const blackMob=countLegal('Black');
+    const mobilityDiff=(whiteMob-blackMob)/100;
+    const sideKingDanger=kingZoneDanger(side);
+    const sideKingShelter=kingShelter(side);
+    const passedDiff=(passedPawns('White')-passedPawns('Black'))/8;
+    arr[769]=sideKingDanger; // danger
+    arr[770]=sideKingShelter; // shelter
+    arr[771]=passedDiff; // passed pawns diff
+    arr[772]=mobilityDiff; // mobility diff
+    return arr;
+}
+function encodeBoardForTF(){ return encodeBoardForTFCore(turn); }
+function encodeBoardForTFWithSide(side){ return encodeBoardForTFCore(side); }
+
+async function evaluatePositionTF(){
+    if (engineMode !== 'tf') return 0;
+    const model = await ensureTFModel();
+    if (!model) return 0;
+    const enc = encodeBoardForTF();
+    const pred = model.predict(tf.tensor2d([Array.from(enc)]));
+    const data = await pred.data();
+    pred.dispose();
+    pred.dispose();
+    return data[0];
+}
+
+async function selectMoveTF(allMoves){
+    const model = await ensureTFModel();
+    if (!model) return allMoves[Math.floor(Math.random()*allMoves.length)];
+    for (let i=allMoves.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [allMoves[i],allMoves[j]]=[allMoves[j],allMoves[i]]; }
+    const plies = moveHistory.length;
+    let effEps = tfEpsilon;
+    if (plies < 8) effEps = Math.max(effEps, 0.4); else if (plies < 20) effEps = Math.max(effEps, 0.25); else effEps = Math.max(effEps*0.5, 0.05);
+    if (Math.random() < effEps) return allMoves[Math.floor(Math.random()*allMoves.length)];
+    let best=null,bestScore=-Infinity; const tieTol=1e-6;
+    for (const mv of allMoves){
+        const pieceName=pieces[mv.fromR][mv.fromC]; const captured=pieces[mv.toR][mv.toC];
+        pieces[mv.toR][mv.toC]=pieceName; pieces[mv.fromR][mv.fromC]=null; const prevTurn=turn; turn=(turn==='White')?'Black':'White';
+        const enc=encodeBoardForTF(); const pred=tfValueModel.predict(tf.tensor2d([Array.from(enc)])); const score=(await pred.data())[0]; pred.dispose();
+        turn=prevTurn; pieces[mv.fromR][mv.fromC]=pieceName; pieces[mv.toR][mv.toC]=captured;
+        if(score>bestScore+tieTol){ bestScore=score; best=mv; }
+        else if(Math.abs(score-bestScore)<=tieTol && Math.random()<0.5){ bestScore=score; best=mv; }
+    }
+    return best||allMoves[0];
+}
 // Track when an AI move is executing (for auto-promotion logic)
 let aiMoveExecuting = false;
 let aiAutoPromotion = null; // {row,col,finalPiece,letter}
@@ -217,6 +394,7 @@ function endGameOnTime(winnerColor) {
     if (resultBanner) resultBanner.textContent = winnerColor + ' wins on time';
     if (newGameBtn) newGameBtn.style.display = 'block';
     console.log('[clock] time over for', loser);
+    collectTrainingFromCompletedGame(winnerColor);
 }
 
 function isLegalMove(piece, fromRow, fromCol, toRow, toCol) {
@@ -586,6 +764,7 @@ function evaluateCheckState(updateLast = false) {
             }
             if (newGameBtn) newGameBtn.style.display = 'block';
             gameOver = true;
+            collectTrainingFromCompletedGame(last.color === 'White' ? 'White' : 'Black');
         } else if (inCheck) {
             last.san += '+';
         } else if (!inCheck && !hasMove) {
@@ -596,6 +775,7 @@ function evaluateCheckState(updateLast = false) {
             }
             if (newGameBtn) newGameBtn.style.display = 'block';
             gameOver = true;
+            collectTrainingFromCompletedGame(null); // draw
         }
         renderHistory();
     }
@@ -923,7 +1103,9 @@ function setupBoard() {
                         if (match) {
                             movePieceTo(activeSelection.fromRow, activeSelection.fromCol, targetRow, targetCol);
                             clearIndicators();
-                            updateMovePanel(activeSelection.piece, activeSelection.fromRow, activeSelection.fromCol, []);
+                            if (activeSelection) {
+                                updateMovePanel(activeSelection.piece, activeSelection.fromRow, activeSelection.fromCol, []);
+                            }
                             return;
                         }
                     }
@@ -973,6 +1155,9 @@ function setupBoard() {
         }
     }
 }
+
+// Legacy hook (previously updated side panel during selection). Provide harmless stub to avoid errors.
+function updateMovePanel(){ /* intentionally empty; panel logic consolidated elsewhere */ }
 
 function handleCastling(fromRow, fromCol, toRow, toCol) {
     if (Math.abs(toCol - fromCol) === 2) {
@@ -1155,6 +1340,68 @@ function recordMove(pieceName, fromRow, fromCol, toRow, toCol, capturedPiece, is
     const fullMoveNumber = Math.ceil(ply / 2);
     moveHistory.push({ ply, san, fullMoveNumber, color });
     renderHistory();
+    // Update opening detection with SAN (without +/# annotations for path)
+    try { updateOpeningRecognition(san); } catch(e){ console.warn('[opening] update failed', e); }
+    // Capture training sample with perspective-correct heuristic (value for side to move after this move)
+    if (engineMode==='tf' && tfModelReady) {
+        try {
+            const sideToMoveAfter = (turn === 'White') ? 'Black' : 'White';
+            const enc = encodeBoardForTFWithSide(sideToMoveAfter);
+            const matScore = computeMaterialImbalance(); // white minus black
+            function countLegal(color){ let total=0; for(let r=0;r<8;r++) for(let c=0;c<8;c++){ const p=pieces[r][c]; if(!p||!p.includes(color)) continue; total += getLegalMoves(p,r,c).length; } return total; }
+            const whiteMob = countLegal('White'); const blackMob = countLegal('Black');
+            const mobilityDiff = whiteMob - blackMob;
+            const whiteInCheck = isKingInCheck('White') ? 1 : 0; const blackInCheck = isKingInCheck('Black') ? 1 : 0;
+            const kingSafety = (blackInCheck - whiteInCheck);
+            let raw = (matScore/20) + 0.02*(mobilityDiff/30) + 0.05*kingSafety;
+            if (raw>1) raw=1; else if (raw<-1) raw=-1;
+            const perspectiveVal = sideToMoveAfter==='White'? raw : -raw;
+            tfTrainingSamples.push({ input: enc, target: perspectiveVal });
+        } catch(e){ console.warn('[tf-engine] sample capture failed', e); }
+    }
+}
+
+function computeMaterialImbalance(){
+    const values = { Pawn:1, Knight:3, Bishop:3, Rook:5, Queen:9 };
+    let white=0, black=0;
+    for (let r=0;r<8;r++) for (let c=0;c<8;c++){ const p=pieces[r][c]; if(!p) continue; const [color,type]=p.split(' '); if (!values[type]) continue; if (color==='White') white+=values[type]; else black+=values[type]; }
+    return white - black;
+}
+
+function collectTrainingFromCompletedGame(winner){
+    if (engineMode!=='tf' || !tfModelReady) return;
+    const outcomeWhite = winner==null ? 0 : (winner==='White'?1:-1); // white perspective
+    const gamePositions = [];
+    for (let i=0;i<positionHistory.length;i++){
+        try {
+            const fen = positionHistory[i];
+            const enc = encodeBoardFromFEN(fen); // active side encoded in feature 768
+            const activeIsWhite = enc[768] === 1;
+            const target = activeIsWhite ? outcomeWhite : -outcomeWhite;
+            gamePositions.push({ input: enc, target });
+        } catch(e){ console.warn('[tf-engine] final outcome sample failed', e); }
+    }
+    tfCurrentGameSamples = gamePositions;
+    const actions = document.getElementById('post-game-actions');
+    if (actions) actions.style.display = 'flex';
+    // Decay epsilon (floor at 0.05)
+    if (typeof tfEpsilon === 'number') {
+        tfEpsilon = Math.max(0.05, tfEpsilon * 0.97);
+    }
+}
+
+function encodeBoardFromFEN(fen){
+    // Reconstruct encoded features without mutating live board
+    const arr = new Float32Array(773);
+    const parts = fen.split(' ');
+    const rows = parts[0].split('/');
+    const mapping = { p:0, n:1, b:2, r:3, q:4, k:5 };
+    for (let r=0;r<8;r++){
+        let file=0; for (const ch of rows[r]){ if (/^[1-8]$/.test(ch)){ file+=parseInt(ch,10); continue; } const isWhite = ch===ch.toUpperCase(); const type = ch.toLowerCase(); const base = mapping[type]; const colorOffset = isWhite?0:6; const idx=(colorOffset+base)*64 + (r*8+file); arr[idx]=1; file++; }
+    }
+    const active = parts[1]==='w' ? 'White' : 'Black';
+    arr[768] = active==='White'?1:0;
+    return arr;
 }
 
 function renderHistory() {
@@ -1214,6 +1461,73 @@ function renderHistory() {
     }
 }
 
+// ---------------- Opening Recognition -----------------
+// Expected JSON schema example (openings.json): [{"eco":"B01","name":"Scandinavian Defense","moves":"e4 d5"}, ...]
+async function ensureOpeningTrie(){
+    if (openingTrie) return openingTrie;
+    if (!openingLoadPromise){
+        openingLoadPromise = (async ()=>{
+            try {
+                const resp = await fetch('openings.json');
+                if (!resp.ok) throw new Error('HTTP '+resp.status);
+                const list = await resp.json();
+                openingTrie = buildOpeningTrie(list);
+                return openingTrie;
+            } catch(e){ console.warn('[opening] load failed', e); openingTrie = {children:{}}; return openingTrie; }
+        })();
+    }
+    return openingLoadPromise;
+}
+
+function buildOpeningTrie(entries){
+    const root = { children: Object.create(null), terminal:null };
+    for (const entry of entries){
+        if (!entry || !entry.moves) continue;
+        const sanSeq = entry.moves.trim().split(/\s+/); // space separated algebraic moves
+        let node = root;
+        for (const san of sanSeq){
+            const key = normalizeSANForOpening(san);
+            if (!node.children[key]) node.children[key] = { children:Object.create(null), terminal:null };
+            node = node.children[key];
+        }
+        // store best (prefer longer name or keep first?) – keep first if already set
+        if (!node.terminal) node.terminal = { eco: entry.eco || '', name: entry.name || entry.moves, moves: sanSeq };
+    }
+    return root;
+}
+
+function normalizeSANForOpening(san){
+    return san.replace(/[+#]/g,''); // strip check/mate symbols; keep captures and promotion markers
+}
+
+async function updateOpeningRecognition(latestSAN){
+    await ensureOpeningTrie();
+    if (!openingTrie) return;
+    if (!currentOpeningNode) currentOpeningNode = openingTrie;
+    // Re-walk from root if a branch ended (handles takebacks / navigation not yet implemented)
+    // Build sequence from moveHistory for robustness
+    let node = openingTrie; let best = null;
+    for (const mv of moveHistory){
+        const key = normalizeSANForOpening(mv.san);
+        if (!node.children[key]) { node = null; break; }
+        node = node.children[key];
+        if (node.terminal) best = node.terminal;
+        // limit depth to avoid huge traversals (openings rarely beyond 30 plies)
+        if (mv.ply > 60) break;
+    }
+    detectedOpening = best;
+    const nameEl = document.getElementById('opening-name');
+    const ecoEl = document.getElementById('opening-eco');
+    if (nameEl){
+        if (best){
+            nameEl.textContent = best.name;
+            if (ecoEl) ecoEl.textContent = best.eco ? best.eco + ' • ' + best.moves.join(' ') : best.moves.join(' ');
+        } else {
+            nameEl.textContent = '—'; if (ecoEl) ecoEl.textContent='';
+        }
+    }
+}
+
 setupBoard();
 
 // Re-apply orientation after initial render (in case classes added before board DOM ready)
@@ -1257,8 +1571,26 @@ function saveCurrentPositionFEN() {
     const fen = generateFEN();
     if (positionHistory[positionHistory.length -1] !== fen) {
         positionHistory.push(fen);
+        // Update repetition count (ignore halfmove/fullmove counters)
+        try {
+            const repKey = fen.split(' ').slice(0,4).join(' ');
+            repetitionCounts[repKey] = (repetitionCounts[repKey]||0)+1;
+        } catch(_) {}
     }
 }
+    // Threefold repetition detection (after adding new position)
+    if (!gameOver) {
+        try {
+            const latestFen = positionHistory[positionHistory.length-1];
+            const repKey = latestFen.split(' ').slice(0,4).join(' ');
+            if (repetitionCounts[repKey] >= 3) {
+                gameOver = true;
+                if (resultBanner) { resultBanner.textContent = 'Draw by threefold repetition'; resultBanner.classList.add('visible'); }
+                if (newGameBtn) newGameBtn.style.display = 'block';
+                collectTrainingFromCompletedGame(null);
+            }
+        } catch(_) {}
+    }
 
 function fenCharToPiece(ch) {
     const isWhite = ch === ch.toUpperCase();
@@ -1378,12 +1710,19 @@ function maybeTriggerAI(){
         ms.forEach(([tr,tc]) => allMoves.push({fromR:obj.r, fromC:obj.c, toR:tr, toC:tc}));
     });
     if (!allMoves.length) return; // stalemate or checkmate handled elsewhere
-    const choice = allMoves[Math.floor(Math.random() * allMoves.length)];
-    setTimeout(()=> {
+    const go = async ()=>{
+        let choice;
+        if (engineMode === 'tf') {
+            try { choice = await selectMoveTF(allMoves); } catch(e){ console.warn('[tf-engine] selection failed, fallback random', e); choice = allMoves[Math.floor(Math.random()*allMoves.length)]; }
+        } else {
+            choice = allMoves[Math.floor(Math.random() * allMoves.length)];
+        }
         aiMoveExecuting = true;
         try { movePieceTo(choice.fromR, choice.fromC, choice.toR, choice.toC); } finally { aiMoveExecuting = false; }
         playMoveSound(false);
-    }, 350); // ensure sound after AI move
+        if (engineMode==='tf') updateModelWeightsFromTF();
+    };
+    setTimeout(go, 250);
 }
 
 function highlightSelectedRow(rowEl) {
@@ -1434,30 +1773,223 @@ try {
 (function populateModelWeights(){
     const tbody = document.getElementById('model-weight-body');
     if (!tbody) return;
-    // Define a representative set of feature weights; all set to 1
-    const featureWeights = {
-        Material:1,
-        Mobility:1,
-        KingSafety:1,
-        CenterControl:1,
-        PawnStructure:1,
-        PieceActivity:1,
-        Pawn:1,
-        Knight:1,
-        Bishop:1,
-        Rook:1,
-        Queen:1,
-        King:1
-    };
-    tbody.innerHTML = '';
-    Object.entries(featureWeights).forEach(([k,v]) => {
-        const tr = document.createElement('tr');
-        const tdF = document.createElement('td'); tdF.textContent = k;
-        const tdW = document.createElement('td'); tdW.textContent = v;
-        tr.appendChild(tdF); tr.appendChild(tdW);
-        tbody.appendChild(tr);
-    });
+    tbody.dataset.dynamic='1';
+    const baseFeatures = ['Material','Mobility','KingSafety','CenterControl','PawnStructure','PieceActivity','Pawn','Knight','Bishop','Rook','Queen','King'];
+    // Start empty (avoid persistent '-') until numbers known
+    tbody.innerHTML = baseFeatures.map(f=>`<tr><td data-feature="${f}">${f}</td><td data-weightCell="1" data-feature-weight="${f}">...</td></tr>`).join('');
 })();
+
+function updateModelWeightsFromTF(){
+    if (!tfValueModel) { console.warn('[tf-engine] updateModelWeightsFromTF: model not ready'); return; }
+    const tbody = document.getElementById('model-weight-body');
+    if (!tbody) return;
+    const firstLayer = tfValueModel.layers[0];
+    if (!firstLayer) return;
+    const w = firstLayer.getWeights()[0]; // kernel (inputDim x units)
+    if (!w) { console.warn('[tf-engine] no kernel weights'); return; }
+    const data = w.dataSync();
+    const inputDim = w.shape[0];
+    const units = w.shape[1];
+    // Helper: average magnitude across rows [rs,re)
+    function avgRows(rs,re){ let sum=0, count=0; for (let r=rs;r<re && r<inputDim;r++){ const base=r*units; for (let c=0;c<units;c++){ sum += Math.abs(data[base+c]); count++; } } return count? (sum/count):0; }
+    // Planes mapping: 0..11 (6 white then 6 black) * 64 squares => 768 rows
+    function planeStart(p){ return p*64; }
+    function planeEnd(p){ return p*64+64; }
+    function avgPlane(p){ return avgRows(planeStart(p), planeEnd(p)); }
+    function combine(planes){ let sum=0, cnt=0; planes.forEach(pl=>{ const v=avgPlane(pl); sum+=v; cnt++; }); return cnt? sum/cnt:0; }
+    const centerSquares = [27,28,35,36]; // within each plane
+    function avgCenterAllPlanes(){ let sum=0, cnt=0; for (let plane=0;plane<12;plane++){ centerSquares.forEach(idx=>{ const row=plane*64+idx; if (row<inputDim){ const base=row*units; for (let c=0;c<units;c++){ sum += Math.abs(data[base+c]); cnt++; } } }); } return cnt? (sum/cnt):0; }
+    const featureValues = {
+        Material: avgRows(0,768),
+        Mobility: combine([1,2,3,4,7,8,9,10]),
+        KingSafety: combine([5,11]),
+        CenterControl: avgCenterAllPlanes(),
+        PawnStructure: combine([0,6]),
+        PieceActivity: combine([0,1,2,3,4,6,7,8,9,10]),
+        Pawn: combine([0,6]),
+        Knight: combine([1,7]),
+        Bishop: combine([2,8]),
+        Rook: combine([3,9]),
+        Queen: combine([4,10]),
+        King: combine([5,11])
+    };
+    const rows = [...tbody.querySelectorAll('tr')];
+    if (!window.__tfPrevFeatureSnapshot) window.__tfPrevFeatureSnapshot = {};
+    rows.forEach(tr=>{
+        const f = tr.querySelector('td[data-feature]');
+        const wcell = tr.querySelector('td[data-weightCell]');
+        // ensure delta cell exists (3rd column)
+        let dcell = tr.querySelector('td[data-deltaCell]');
+        if (!dcell){ dcell = document.createElement('td'); dcell.setAttribute('data-deltaCell','1'); tr.appendChild(dcell); }
+        if (f && wcell && featureValues[f.dataset.feature] !== undefined){
+            const prev = window.__tfPrevFeatureSnapshot[f.dataset.feature];
+            const cur = featureValues[f.dataset.feature];
+            const valStr = cur.toFixed(4);
+            const before = wcell.textContent;
+            wcell.textContent = valStr;
+            console.log('[tf-engine] set weight', f.dataset.feature, 'before=', before, 'after=', wcell.textContent);
+            if (!isNaN(prev)){
+                const d = cur - prev; const s = (d>=0?'+':'') + d.toFixed(4);
+                dcell.textContent = s;
+                dcell.style.textAlign = 'right';
+                dcell.style.color = d>0 ? '#2d6a2d' : (d<0 ? '#8c1f1f' : '');
+            } else {
+                dcell.textContent = '—'; dcell.style.textAlign='right';
+            }
+        }
+    });
+    // Retry pass next frame in case something overwrote (defensive)
+    requestAnimationFrame(()=>{
+        rows.forEach(tr=>{
+            const f = tr.querySelector('td[data-feature]');
+            const wcell = tr.querySelector('td[data-weightCell]');
+            if (f && wcell && wcell.textContent.trim()==='-') {
+                const v = featureValues[f.dataset.feature];
+                if (v !== undefined) { wcell.textContent = v.toFixed(3); console.log('[tf-engine] retry fixed hyphen for', f.dataset.feature); }
+            }
+        });
+        // If still all hyphens, rebuild tbody entirely as a fallback
+        const stillAll = rows.every(tr=>{
+            const wcell = tr.querySelector('td[data-weightCell]');
+            return wcell && wcell.textContent.trim() === '-';
+        });
+        if (stillAll) {
+            console.warn('[tf-engine] fallback rebuild of weight table');
+            const tbody = document.getElementById('model-weight-body');
+            if (tbody) {
+                const featureOrder = Object.keys(featureValues);
+                tbody.innerHTML = '';
+                featureOrder.forEach(fName=>{
+                    const tr = document.createElement('tr');
+                    const tdF = document.createElement('td'); tdF.textContent = fName; tdF.dataset.feature = fName;
+                    const tdW = document.createElement('td'); tdW.dataset.weightCell='1'; tdW.textContent = featureValues[fName].toFixed(3);
+                    tr.appendChild(tdF); tr.appendChild(tdW); tbody.appendChild(tr);
+                });
+            }
+        }
+    });
+    console.log('[tf-engine] weights updated');
+    // Cache values globally for observer reapplication
+    window.__tfPrevFeatureSnapshot = window.__tfFeatureSnapshot || featureValues;
+    window.__tfFeatureSnapshot = featureValues;
+    try { localStorage.setItem('tfFeatureSnapshot', JSON.stringify(featureValues)); } catch(_){}
+    // Update meta text
+    const meta = document.querySelector('#model-info-panel .model-meta');
+    if (meta) meta.innerHTML = `Engine: TFValueNet<br><span class="note">Layer0 avg | rows:${inputDim} units:${units}</span>`;
+}
+
+// Early model load so weights appear without waiting for first AI move
+if (engineMode === 'tf') {
+    const meta = document.querySelector('#model-info-panel .model-meta');
+    if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Loading model...</span>';
+    ensureTFModel().then(()=> { try { updateModelWeightsFromTF(); } catch(_){} }).catch(()=>{});
+}
+
+// Ensure post-game action block hidden at startup (defensive against cached DOM state)
+const __postGameActions = document.getElementById('post-game-actions');
+if (__postGameActions) __postGameActions.style.display = 'none';
+
+// Allow manual refresh of weights (helpful if async load race)
+document.addEventListener('click', (e)=>{
+    const panel = document.getElementById('model-info-panel');
+    if (!panel) return;
+    if (panel.contains(e.target) && engineMode==='tf') {
+        // If cells still '-', try again
+        const anyDash = !!panel.querySelector('td[data-weightCell]') && Array.from(panel.querySelectorAll('td[data-weightCell]')).every(td=>td.textContent.trim()==='-');
+        if (anyDash) { ensureTFModel().then(()=> updateModelWeightsFromTF()); }
+    }
+});
+
+// Explicit refresh button handler
+const refreshBtn = document.getElementById('refresh-weights-btn');
+if (refreshBtn){
+    refreshBtn.addEventListener('click', async ()=>{
+        const meta = document.querySelector('#model-info-panel .model-meta');
+        if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Refreshing...</span>';
+        try {
+            await ensureTFModel();
+            updateModelWeightsFromTF();
+            if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Updated</span>';
+        } catch(e){
+            console.error('[tf-engine] refresh failed', e);
+            if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note" style="color:#c82828;">Refresh failed</span>';
+        }
+        setTimeout(()=>{ const m=document.querySelector('#model-info-panel .model-meta'); if (m && /Updated|failed/.test(m.innerHTML)) { m.innerHTML='Engine: TFValueNet<br><span class="note">Layer0 avg</span>'; } }, 2500);
+    });
+}
+
+// Footer post-game buttons
+const footerTrainBtn = document.getElementById('btn-train-this-game');
+if (footerTrainBtn){
+    footerTrainBtn.addEventListener('click', async ()=>{
+        if (tfTrainingInProgress) return;
+        if (!tfCurrentGameSamples.length){
+            footerTrainBtn.textContent = 'No samples from game';
+            footerTrainBtn.disabled = true;
+            setTimeout(()=>{ footerTrainBtn.textContent='Train model on this game'; }, 1800);
+            return;
+        }
+        const gameSampleCount = tfCurrentGameSamples.length;
+        console.log('[tf-engine] manual train clicked; samples=', gameSampleCount, ' existing buffer=', tfTrainingSamples.length);
+        // Merge samples into global buffer then train
+        tfTrainingSamples = tfTrainingSamples.concat(tfCurrentGameSamples);
+        tfCurrentGameSamples = [];
+        footerTrainBtn.disabled = true;
+        footerTrainBtn.dataset.originalText = footerTrainBtn.textContent;
+        footerTrainBtn.textContent = 'Training '+gameSampleCount+' positions...';
+        footerTrainBtn.style.opacity = '0.7';
+        const meta = document.querySelector('#model-info-panel .model-meta');
+        if (meta) meta.innerHTML = 'Engine: TFValueNet<br><span class="note">Training '+gameSampleCount+' positions...</span>';
+        const t0 = performance.now();
+        await trainModelOnSamples();
+        const t1 = performance.now();
+        // Force weight panel refresh (in case auto-update skipped)
+        try { updateModelWeightsFromTF(); } catch(_){}
+        const secs = ((t1 - t0)/1000).toFixed(2);
+        footerTrainBtn.textContent = 'Trained ('+gameSampleCount+') ✓';
+        footerTrainBtn.style.opacity = '1';
+        console.log('[tf-engine] manual training complete in', secs,'s totalSamples buffer=', tfTrainingSamples.length);
+        // Leave disabled; user must finish another game for new samples
+    });
+}
+const footerResetBtn = document.getElementById('btn-reset-model-footer');
+if (footerResetBtn){
+    footerResetBtn.addEventListener('click', ()=>{ if (confirm('Reset model weights?')) { reinitializeTFModel(); } });
+}
+
+// Reset model button
+const resetBtn = document.getElementById('reset-model-btn');
+if (resetBtn){
+    resetBtn.addEventListener('click', ()=>{
+        if (!confirm('Reset model weights? This clears learned adjustments.')) return;
+        reinitializeTFModel();
+    });
+}
+
+// Auto retry once after a short delay if still hyphens
+setTimeout(()=>{
+    const tbody = document.getElementById('model-weight-body');
+    if (!tbody) return;
+    const allDashes = Array.from(tbody.querySelectorAll('td[data-weightCell]')).every(td=>td.textContent.trim()==='-');
+    if (allDashes) { console.log('[tf-engine] auto-retry weight update'); ensureTFModel().then(()=> updateModelWeightsFromTF()); }
+}, 1500);
+
+// Expose manual helper for debugging
+window.forceUpdateWeights = ()=>{ ensureTFModel().then(()=> updateModelWeightsFromTF()); };
+
+// MutationObserver to re-apply weights if cells revert
+const weightTbody = document.getElementById('model-weight-body');
+if (weightTbody && typeof MutationObserver !== 'undefined') {
+    const obs = new MutationObserver(()=>{
+        if (!window.__tfFeatureSnapshot) return;
+        const vals = window.__tfFeatureSnapshot;
+        const cells = weightTbody.querySelectorAll('td[data-weightCell]');
+        let repaired = 0;
+        cells.forEach(td=>{ if (td.textContent.trim()==='-' || td.textContent.trim()==='...' ){ const f=td.previousElementSibling?.dataset.feature; if (f && vals[f]!==undefined){ td.textContent=vals[f].toFixed(3); repaired++; }} });
+        if (repaired>0) console.log('[tf-engine] mutation observer reapplied', repaired, 'weights');
+    });
+    obs.observe(weightTbody, {childList:true, subtree:true, characterData:true});
+}
 
 // ------- Material Balance (appended) -------
 function updateMaterialBalance(){
