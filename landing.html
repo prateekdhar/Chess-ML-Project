@@ -72,6 +72,16 @@
       </table>
     </div>
     <div style="font-size:11px;opacity:.7;margin-top:8px;">Preview of first-layer aggregated magnitudes. Updated from saved local model.</div>
+    <div id="selfplay-panel" style="margin-top:18px;padding-top:14px;border-top:1px solid var(--panel-border);">
+      <div style="font-weight:600;font-size:14px;margin-bottom:6px;display:flex;align-items:center;gap:8px;">Self-Play Training</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <label for="selfplay-games" style="font-size:12px;font-weight:600;">Games:</label>
+        <input id="selfplay-games" type="number" min="1" max="500" value="25" style="width:80px;padding:4px 6px;border:1px solid var(--panel-border);border-radius:6px;background:var(--history-even);" />
+        <button id="selfplay-start" type="button" style="padding:6px 14px;border:none;background:var(--panel-border);color:var(--square-light);font-weight:600;border-radius:6px;cursor:pointer;">Start Self-Play</button>
+        <button id="selfplay-cancel" type="button" disabled style="padding:6px 10px;border:none;background:#777;color:#fff;font-weight:600;border-radius:6px;cursor:not-allowed;">Cancel</button>
+      </div>
+      <div id="selfplay-progress" style="margin-top:10px;font-size:12px;line-height:1.4;min-height:34px;white-space:pre-wrap;font-family:monospace;"></div>
+    </div>
   </div>
   <script>
     (function(){
@@ -188,6 +198,97 @@
       init();
       const refreshBtn = document.getElementById('landing-refresh-weights-btn');
       if (refreshBtn){ refreshBtn.addEventListener('click', async ()=>{ if (loading) return; if (meta) meta.textContent='Refreshing...'; await ensureModel(); updateWeights(); }); }
+
+      // ---------- Self-Play Training Logic (simplified) ----------
+      const startBtn = document.getElementById('selfplay-start');
+      const cancelBtn = document.getElementById('selfplay-cancel');
+      const gamesInput = document.getElementById('selfplay-games');
+      const progressEl = document.getElementById('selfplay-progress');
+      let cancelFlag = false;
+      let selfPlaySamples = [];
+
+      function logProgress(msg){ if (progressEl) progressEl.textContent = msg; }
+
+      function cloneBoard(b){ return b.map(r=>r.slice()); }
+      function startBoard(){
+        return [
+          ['Black Rook','Black Knight','Black Bishop','Black Queen','Black King','Black Bishop','Black Knight','Black Rook'],
+          Array(8).fill('Black Pawn'),
+          Array(8).fill(null),Array(8).fill(null),Array(8).fill(null),Array(8).fill(null),
+          Array(8).fill('White Pawn'),
+          ['White Rook','White Knight','White Bishop','White Queen','White King','White Bishop','White Knight','White Rook']
+        ];
+      }
+      function materialDiff(board){ const values={Pawn:1,Knight:3,Bishop:3,Rook:5,Queen:9}; let w=0,b=0; for (let r=0;r<8;r++){ for(let c=0;c<8;c++){ const p=board[r][c]; if(!p) continue; const [color,type]=p.split(' '); if(!values[type]) continue; if(color==='White') w+=values[type]; else b+=values[type]; } } return w-b; }
+      function generateMoves(board, color){
+        const moves=[]; const opponent = color==='White'?'Black':'White';
+        for (let r=0;r<8;r++) for (let c=0;c<8;c++){ const p=board[r][c]; if(!p||!p.includes(color)) continue; const type=p.split(' ')[1];
+          if (type==='Pawn'){
+            const dir = color==='White'? -1:1; const nr=r+dir; if (nr>=0&&nr<8){ if(!board[nr][c]) moves.push({r,c,nr,nc:c}); const ncL=c-1, ncR=c+1; [ncL,ncR].forEach(nc=>{ if(nc>=0&&nc<8){ const tp=board[nr][nc]; if (tp&&tp.includes(opponent)) moves.push({r,c,nr,nc}); } }); }
+          } else if (type==='Knight'){
+            const deltas=[[2,1],[1,2],[-1,2],[-2,1],[-2,-1],[-1,-2],[1,-2],[2,-1]]; deltas.forEach(([dr,dc])=>{ const nr=r+dr,nc=c+dc; if(nr>=0&&nr<8&&nc>=0&&nc<8){ const tp=board[nr][nc]; if(!tp||tp.includes(opponent)) moves.push({r,c,nr,nc}); }});
+          } else if (type==='Bishop' || type==='Rook' || type==='Queen'){
+            const dirs=[]; if (type==='Bishop'||type==='Queen') dirs.push([1,1],[1,-1],[-1,1],[-1,-1]); if (type==='Rook'||type==='Queen') dirs.push([1,0],[-1,0],[0,1],[0,-1]);
+            dirs.forEach(([dr,dc])=>{ let nr=r+dr,nc=c+dc; while(nr>=0&&nr<8&&nc>=0&&nc<8){ const tp=board[nr][nc]; if(!tp){ moves.push({r,c,nr,nc}); } else { if (tp.includes(opponent)) moves.push({r,c,nr,nc}); break; } nr+=dr; nc+=dc; } });
+          } else if (type==='King'){
+            for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){ if(!dr&&!dc) continue; const nr=r+dr,nc=c+dc; if(nr>=0&&nr<8&&nc>=0&&nc<8){ const tp=board[nr][nc]; if(!tp||tp.includes(opponent)) moves.push({r,c,nr,nc}); }}
+          }
+        }
+        return moves;
+      }
+      function encodeBoard(board, turnColor){
+        const mapping={Pawn:0,Knight:1,Bishop:2,Rook:3,Queen:4,King:5}; const arr=new Float32Array(773);
+        for (let r=0;r<8;r++) for (let c=0;c<8;c++){ const p=board[r][c]; if(!p) continue; const [color,type]=p.split(' '); const base=mapping[type]; const colorOffset=color==='White'?0:6; const idx=(colorOffset+base)*64 + (r*8+c); arr[idx]=1; }
+        arr[768]= (turnColor==='White')?1:0; return arr;
+      }
+      async function selectModelMove(board, color){
+        if (!model) return null; const moves=generateMoves(board,color); if (!moves.length) return null; let best=null; let bestScore=-Infinity; const opp=color==='White'?'Black':'White';
+        for(const mv of moves){ const piece=board[mv.r][mv.c]; const captured=board[mv.nr][mv.nc]; board[mv.nr][mv.nc]=piece; board[mv.r][mv.c]=null; const enc=encodeBoard(board, opp); const pred=model.predict(tf.tensor2d([Array.from(enc)])); const score=(await pred.data())[0]; pred.dispose(); board[mv.r][mv.c]=piece; board[mv.nr][mv.nc]=captured; if(score>bestScore){ bestScore=score; best=mv; } }
+        return best || moves[0];
+      }
+      async function selfPlayOneGame(gameIndex, totalGames){
+        let board=startBoard(); let turnColor='White'; let plies=0; const maxPlies=160; let gamePositions=[]; let outcome=0; // 0 draw baseline
+        while(plies<maxPlies){ if(cancelFlag) return null; const moves=generateMoves(board, turnColor); if(!moves.length) break; const mv= await selectModelMove(board, turnColor) || moves[Math.floor(Math.random()*moves.length)]; const piece=board[mv.r][mv.c]; board[mv.nr][mv.nc]=piece; board[mv.r][mv.c]=null; // promotion ignore
+          // sample
+          const enc=encodeBoard(board, turnColor==='White'?'Black':'White'); const mat=materialDiff(board); const target=Math.max(-1, Math.min(1, mat/20)); gamePositions.push({input:enc, target});
+          turnColor = (turnColor==='White')?'Black':'White'; plies++; }
+        // Outcome heuristic by material difference
+        const finalMat = materialDiff(board); if (finalMat>0) outcome=1; else if (finalMat<0) outcome=-1; else outcome=0;
+        // Label last up to 30 positions with outcome
+        const labelCount = Math.min(30, gamePositions.length); for (let i=gamePositions.length - labelCount; i<gamePositions.length; i++){ gamePositions[i].target = outcome; }
+        selfPlaySamples = selfPlaySamples.concat(gamePositions);
+        logProgress(`Game ${gameIndex+1}/${totalGames}\nPositions: ${gamePositions.length} (total samples ${selfPlaySamples.length})`);
+        return {positions: gamePositions.length, outcome};
+      }
+      async function trainOnSelfPlay(){
+        if (!selfPlaySamples.length) return; await ensureModel(); if(!model) return; if (!model.optimizer) model.compile({optimizer:'adam',loss:'meanSquaredError'});
+        const xs=tf.tensor2d(selfPlaySamples.map(s=>Array.from(s.input))); const ys=tf.tensor2d(selfPlaySamples.map(s=>[s.target]));
+        const before=(()=>{ try{ const w=model.layers[0].getWeights()[0].dataSync(); let s=0; for(let i=0;i<w.length;i++) s+=Math.abs(w[i]); return s; } catch(_){ return 0; } })();
+        logProgress(prev=> (prev?prev+'\n':'') + 'Training on '+selfPlaySamples.length+' samples...');
+        await model.fit(xs, ys, {epochs:3,batchSize:Math.min(64,selfPlaySamples.length),verbose:0,callbacks:{onEpochEnd:(e,l)=>{ console.log('[selfplay] epoch',e+1,'loss',Number(l.loss).toFixed(5)); }}});
+        xs.dispose(); ys.dispose();
+        try { await model.save('indexeddb://tf-chess-eval'); localStorage.setItem('tfEngineModelSaved','1'); } catch(_){ }
+        updateWeights();
+        const after=(()=>{ try{ const w=model.layers[0].getWeights()[0].dataSync(); let s=0; for(let i=0;i<w.length;i++) s+=Math.abs(w[i]); return s; } catch(_){ return 0; } })();
+        logProgress(progressEl.textContent + `\nTraining complete. Δ checksum ${(after-before).toFixed(6)}`);
+        selfPlaySamples=[];
+      }
+      async function runSelfPlay(){
+        await ensureModel(); if (!model){ logProgress('Model unavailable.'); return; }
+        cancelFlag=false; const total = Math.max(1, Math.min(500, parseInt(gamesInput.value,10)||1));
+        startBtn.disabled=true; cancelBtn.disabled=false; cancelBtn.style.cursor='pointer'; cancelBtn.style.background='#c24747';
+        logProgress('Starting self-play for '+total+' games...');
+        for (let g=0; g<total; g++){
+          if (cancelFlag){ logProgress('Cancelled at game '+(g+1)); break; }
+            await selfPlayOneGame(g,total);
+            // Yield to UI
+            await new Promise(res=> setTimeout(res, 0));
+        }
+        if (!cancelFlag) { await trainOnSelfPlay(); }
+        startBtn.disabled=false; cancelBtn.disabled=true; cancelBtn.style.background='#777'; cancelBtn.style.cursor='not-allowed';
+      }
+      if (startBtn){ startBtn.addEventListener('click', ()=> runSelfPlay()); }
+      if (cancelBtn){ cancelBtn.addEventListener('click', ()=>{ cancelFlag=true; cancelBtn.disabled=true; cancelBtn.style.background='#777'; cancelBtn.style.cursor='not-allowed'; }); }
     })();
   </script>
 </body>
