@@ -1,3 +1,26 @@
+      // Reset Model button logic
+      const resetBtn = document.getElementById('selfplay-reset');
+      if (resetBtn){
+        resetBtn.addEventListener('click', async ()=>{
+          if (!confirm('Reset model weights? This clears all learned adjustments.')) return;
+          if (typeof tf === 'undefined') return;
+          model = tf.sequential();
+          model.add(tf.layers.dense({inputShape:[773],units:96,activation:'relu'}));
+          model.add(tf.layers.dense({units:48,activation:'relu'}));
+          model.add(tf.layers.dense({units:1,activation:'tanh'}));
+          model.compile({optimizer:'adam',loss:'meanSquaredError'});
+          try { await model.save('indexeddb://tf-chess-eval'); localStorage.setItem('tfEngineModelSaved','1'); } catch(_){}
+          updateWeights();
+          logProgress('Model reset.');
+        });
+      }
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <label for="selfplay-games" style="font-size:12px;font-weight:600;">Games:</label>
+        <input id="selfplay-games" type="number" min="1" max="500" value="25" style="width:80px;padding:4px 6px;border:1px solid var(--panel-border);border-radius:6px;background:var(--history-even);" />
+        <button id="selfplay-start" type="button" style="padding:6px 14px;border:none;background:var(--panel-border);color:var(--square-light);font-weight:600;border-radius:6px;cursor:pointer;">Start Self-Play</button>
+        <button id="selfplay-cancel" type="button" disabled style="padding:6px 10px;border:none;background:#777;color:#fff;font-weight:600;border-radius:6px;cursor:not-allowed;">Cancel</button>
+        <button id="selfplay-reset" type="button" style="padding:6px 10px;border:none;background:#c24747;color:#fff;font-weight:600;border-radius:6px;cursor:pointer;">Reset Model</button>
+      </div>
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -247,13 +270,42 @@
         return best || moves[0];
       }
       async function selfPlayOneGame(gameIndex, totalGames){
-        let board=startBoard(); let turnColor='White'; let plies=0; const maxPlies=160; let gamePositions=[]; let outcome=0; // 0 draw baseline
-        while(plies<maxPlies){ if(cancelFlag) return null; const moves=generateMoves(board, turnColor); if(!moves.length) break; const mv= await selectModelMove(board, turnColor) || moves[Math.floor(Math.random()*moves.length)]; const piece=board[mv.r][mv.c]; board[mv.nr][mv.nc]=piece; board[mv.r][mv.c]=null; // promotion ignore
+        let board=startBoard(); let turnColor='White'; let plies=0; let gamePositions=[]; let outcome=0; // 0 draw baseline
+        let movesSincePawnOrCapture = 0;
+        let lastMat = materialDiff(board);
+        while(true){
+          if(cancelFlag) return null;
+          // King-capture detection
+          let whiteKing=false, blackKing=false;
+          for(let r=0;r<8;r++)for(let c=0;c<8;c++){ const p=board[r][c]; if(p==='White King') whiteKing=true; if(p==='Black King') blackKing=true; }
+          if (!whiteKing || !blackKing) break;
+          // 50-move rule
+          if (movesSincePawnOrCapture >= 50) { outcome=0; break; }
+          const moves=generateMoves(board, turnColor);
+          if(!moves.length) break;
+          const mv= await selectModelMove(board, turnColor) || moves[Math.floor(Math.random()*moves.length)];
+          const piece=board[mv.r][mv.c];
+          const captured=board[mv.nr][mv.nc];
+          board[mv.nr][mv.nc]=piece; board[mv.r][mv.c]=null;
           // sample
-          const enc=encodeBoard(board, turnColor==='White'?'Black':'White'); const mat=materialDiff(board); const target=Math.max(-1, Math.min(1, mat/20)); gamePositions.push({input:enc, target});
-          turnColor = (turnColor==='White')?'Black':'White'; plies++; }
-        // Outcome heuristic by material difference
-        const finalMat = materialDiff(board); if (finalMat>0) outcome=1; else if (finalMat<0) outcome=-1; else outcome=0;
+          const enc=encodeBoard(board, turnColor==='White'?'Black':'White');
+          const mat=materialDiff(board);
+          const target=Math.max(-1, Math.min(1, mat/20));
+          gamePositions.push({input:enc, target});
+          // 50-move rule update
+          if (piece.includes('Pawn') || captured) movesSincePawnOrCapture=0; else movesSincePawnOrCapture++;
+          turnColor = (turnColor==='White')?'Black':'White';
+          plies++;
+        }
+        // Outcome heuristic by material difference or king capture
+        let whiteKing=false, blackKing=false;
+        for(let r=0;r<8;r++)for(let c=0;c<8;c++){ const p=board[r][c]; if(p==='White King') whiteKing=true; if(p==='Black King') blackKing=true; }
+        if (!whiteKing && blackKing) outcome=-1;
+        else if (whiteKing && !blackKing) outcome=1;
+        else {
+          const finalMat = materialDiff(board);
+          if (finalMat>0) outcome=1; else if (finalMat<0) outcome=-1; else outcome=0;
+        }
         // Label last up to 30 positions with outcome
         const labelCount = Math.min(30, gamePositions.length); for (let i=gamePositions.length - labelCount; i<gamePositions.length; i++){ gamePositions[i].target = outcome; }
         selfPlaySamples = selfPlaySamples.concat(gamePositions);
